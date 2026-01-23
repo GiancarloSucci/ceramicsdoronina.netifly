@@ -34,8 +34,8 @@ exports.handler = async (event) => {
       return { statusCode: 400, body: 'Missing origin' };
     }
 
-    const successUrl = `${origin}/indexStripe.html?stripe_success=1&session_id={CHECKOUT_SESSION_ID}#catalogue`;
-    const cancelUrl  = `${origin}/indexStripe.html?stripe_cancel=1#catalogue`;
+    const successUrl = `/netlify_stripe-success.html?session_id={CHECKOUT_SESSION_ID}#catalogue`;
+    const cancelUrl  = `/netlify_stripe-cancel.html#catalogue`;
 
     // NB: line_items in mode=payment richiede price_data.
     const session = await stripe.checkout.sessions.create({

@@ -3,12 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Ceramics Doronina · Stripe</title>
+  <title>Ceramics Doronina · Handmade Ceramics · IT / EN / RU</title>
+  <meta name="description" content="Tactile interior ceramics with bead embroidery by Ceramist Doronina. Handmade vases and art objects created in Liguria, Italy." />
 
-  <!-- SheetJS (per ODS) -->
+  <!-- Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+
+  <!-- SheetJS (ODS parsing) -->
   <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
 
-  <!-- Stili principali (riuso gli stessi del sito) -->
+  <!-- Stili principali (del sito) -->
   <link rel="stylesheet" href="css/base.css">
   <link rel="stylesheet" href="css/layout.css">
   <link rel="stylesheet" href="css/components.css">
@@ -16,13 +22,14 @@
   <link rel="stylesheet" href="css/pages.css">
   <link rel="stylesheet" href="css/mobile.css">
 
-  <!-- Override Stripe (solo se serve) -->
-  <link rel="stylesheet" href="Stripe/css/stripe.css">
+  <!-- Stripe overrides (solo per versione Netlify/Stripe) -->
+  <link rel="stylesheet" href="Stripe/css/netlify_stripe.css">
 </head>
 <body>
   <!-- Navbar -->
   <div id="import-navbar"></div>
 
+  <!-- Contenuto principale -->
   <main>
     <div id="import-hero"></div>
     <div id="import-about"></div>
@@ -32,15 +39,34 @@
     <div id="import-contact"></div>
   </main>
 
+  <!-- Modali dinamiche -->
   <div id="import-modals"></div>
+
+  <!-- Footer -->
   <div id="import-footer"></div>
+
+  <!-- Bottone piccolo per switch Desktop/Mobile view -->
   <div id="import-view-toggle"></div>
 
-  <!-- CART DRAWER (riuso identico) -->
+  <!-- Dizionario lingue (COPIA per Netlify) -->
+  <script src="messages.js" defer></script>
+  <script src="i18n.js" defer></script>
+
+  <!-- Catalogue + Stripe cart -->
+  <script src="Stripe/js/netlify_catalogueStripe.js" defer></script>
+  <script src="masterclass.js" defer></script>
+  <script src="certificati.js" defer></script>
+  <script src="Stripe/js/netlify_uiStripe.js" defer></script>
+  <script src="Stripe/js/netlify_appStripe.js" defer></script>
+
+  <!-- Importer (carica i partials prefissati netlify_) -->
+  <script src="Stripe/js/netlify_importerStripe.js" defer></script>
+
+  <!-- CART DRAWER -->
   <div id="cart-drawer" class="cart-drawer" aria-hidden="true">
     <div class="cart-drawer__panel">
       <div class="cart-drawer__header">
-        <div class="cart-drawer__title" data-i18n="cart.title">Cart</div>
+        <div class="cart-drawer__title">Cart</div>
         <button id="cart-close-btn" class="cart-drawer__close" type="button" aria-label="Close cart">×</button>
       </div>
 
@@ -48,26 +74,15 @@
 
       <div class="cart-drawer__footer">
         <div class="cart-drawer__total">
-          <span data-i18n="cart.total">Total</span>
+          <span>Total</span>
           <span id="cart-total">—</span>
         </div>
-        <a id="cart-checkout-btn" class="cart-drawer__checkout" href="#" rel="noopener">
+        <button id="cart-checkout-btn" class="cart-drawer__checkout" type="button">
           Checkout
-        </a>
+        </button>
       </div>
     </div>
   </div>
 
-  <!-- Dizionario lingue -->
-  <script src="messages.js" defer></script>
-  <script src="i18n.js" defer></script>
-
-  <!-- Versioni Stripe (non toccano Shopify) -->
-  <script src="Stripe/js/catalogueStripe.js" defer></script>
-  <script src="masterclass.js" defer></script>
-  <script src="certificati.js" defer></script>
-  <script src="Stripe/js/uiStripe.js" defer></script>
-  <script src="Stripe/js/appStripe.js" defer></script>
-  <script src="Stripe/js/importerStripe.js" defer></script>
 </body>
 </html>

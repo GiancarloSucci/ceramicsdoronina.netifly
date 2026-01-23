@@ -121,7 +121,7 @@
     const res = await fetch(CHECKOUT_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items, locale: getLang() })
+      body: JSON.stringify({ origin: window.location.origin, items: lineItems, locale: getLang() })
     });
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
@@ -210,7 +210,7 @@
         const qty = Math.max(1, Number(ci.qty || 1));
         totalCents += (Number(p.priceCents || 0) * qty);
 
-        const title = (p.titles && (p.titles[lang] || p.titles.it || p.titles.en || p.titles.ru)) || ci.id;
+        const title = (p.titleByLang && (p.titleByLang[lang] || p.titleByLang.it || p.titleByLang.en || p.titleByLang.ru)) || (p.nameByLang && (p.nameByLang[lang] || p.nameByLang.it || p.nameByLang.en || p.nameByLang.ru)) || (p.titles && (p.titles[lang] || p.titles.it || p.titles.en || p.titles.ru)) || p.title || ci.id;
         const price = formatMoney(Number(p.priceCents || 0) * qty, currency);
 
         return `
