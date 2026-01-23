@@ -1,11 +1,7 @@
 {
-  "name": "ceramics-doronina-stripe-netlify",
-  "private": true,
+  "name": "ceramicsdoronina-stripe-functions",
   "version": "1.0.0",
-  "description": "Static site + Netlify Functions for Stripe Checkout",
-  "engines": {
-    "node": "18"
-  },
+  "private": true,
   "dependencies": {
     "stripe": "^14.0.0"
   }
