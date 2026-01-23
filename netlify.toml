@@ -1,0 +1,6 @@
+[build]
+  publish = "."
+  functions = "Stripe/netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
