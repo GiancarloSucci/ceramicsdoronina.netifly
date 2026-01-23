@@ -121,7 +121,7 @@
     const res = await fetch(CHECKOUT_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lineItems, locale: getLang() })
+      body: JSON.stringify({ items, locale: getLang() })
     });
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
