@@ -12,7 +12,6 @@ function corsHeaders(origin) {
 }
 
 function parseAllowedOrigins() {
-  // separati da spazio o virgola
   const raw = process.env.ALLOWED_ORIGINS || "";
   return raw
     .split(/[\s,]+/)
@@ -23,28 +22,19 @@ function parseAllowedOrigins() {
 exports.handler = async (event) => {
   const origin = event.headers?.origin || event.headers?.Origin || "";
 
-  // Preflight CORS
+  // Preflight
   if (event.httpMethod === "OPTIONS") {
-    // Se vuoi essere più restrittivo: rispondi solo se origin è ammesso
-    return {
-      statusCode: 204,
-      headers: corsHeaders(origin || "*"),
-      body: "",
-    };
+    return { statusCode: 204, headers: corsHeaders(origin || "*"), body: "" };
   }
 
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
-  // CORS allowlist (consigliata)
+  // CORS allowlist
   const allowed = parseAllowedOrigins();
   if (!origin) {
-    return {
-      statusCode: 400,
-      headers: { "Content-Type": "text/plain" },
-      body: "Missing origin",
-    };
+    return { statusCode: 400, headers: { "Content-Type": "text/plain" }, body: "Missing origin" };
   }
   if (allowed.length > 0 && !allowed.includes(origin)) {
     return {
@@ -69,12 +59,11 @@ exports.handler = async (event) => {
     const payload = event.body ? JSON.parse(event.body) : {};
     const items = payload.items || payload.lineItems || [];
 
-    // URL di ritorno: meglio usare il sito “vero” (ceramicsdoronina.it),
-    // quindi passala dal frontend come payload.return_base
+    // dove tornare dopo checkout (PROD: ceramicsdoronina.it)
     const returnBase = String(payload.return_base || "").trim() || origin;
 
-    const successUrl = `${returnBase}/stripe-success.html`;
-    const cancelUrl  = `${returnBase}/stripe-cancel.html`;
+    const successUrl = `${returnBase}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}#catalogue`;
+    const cancelUrl  = `${returnBase}/stripe-cancel.html#catalogue`;
 
     if (!Array.isArray(items) || items.length === 0) {
       return {
@@ -85,9 +74,11 @@ exports.handler = async (event) => {
     }
 
     const line_items = items.map((it) => {
-      const name = String(it.name || "Item").trim();
+      const name = String(it.name || "Item").trim().slice(0, 120);
+      const currency = String(it.currency || "eur").toLowerCase();
       const unit_amount = Number(it.unit_amount);
       const quantity = Number(it.quantity ?? it.qty ?? 1);
+      const image = it.image ? String(it.image) : "";
 
       if (!Number.isFinite(unit_amount) || !Number.isInteger(unit_amount) || unit_amount <= 0) {
         throw new Error(`Invalid integer: ${unit_amount}`);
@@ -99,80 +90,58 @@ exports.handler = async (event) => {
       return {
         quantity,
         price_data: {
-          currency: "eur",
+          currency,
           unit_amount,
-          product_data: { name },
+          product_data: {
+            name,
+            images: image ? [image] : undefined,
+          },
         },
       };
     });
 
-//    const session = await stripe.checkout.sessions.create({
- //     mode: "payment",
-  //    line_items,
-   //   success_url: successUrl,
-    //  cancel_url: cancelUrl,
-//      // opzionale: metadata
-//      metadata: payload.metadata || undefined,
-//    });
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
 
-// Origin: usato per success/cancel URL (DEV + PROD)
-const origin =
-  (event.headers && (event.headers.origin || event.headers.Origin)) ||
-  (payload.origin || '');
-
-if (!origin) return { statusCode: 400, body: 'Missing origin' };
-
-// URL ASSOLUTE (Stripe le vuole assolute)
-const successUrl = `${origin}/netlify_stripe-success.html?session_id={CHECKOUT_SESSION_ID}#catalogue`;
-const cancelUrl  = `${origin}/netlify_stripe-cancel.html#catalogue`;
-
-const session = await stripe.checkout.sessions.create({
-  mode: 'payment',
-  success_url: successUrl,
-  cancel_url: cancelUrl,
-
-  line_items: items.map((it) => ({
-    quantity: Math.max(1, Number(it.quantity || 1)),
-    price_data: {
-      currency: String(it.currency || 'eur').toLowerCase(),
-      unit_amount: Number(it.unit_amount),
-      product_data: {
-        name: String(it.name || 'Item').slice(0, 120),
-        images: it.image ? [String(it.image)] : undefined,
+      // spedizione / fatturazione / contatti
+      shipping_address_collection: {
+        allowed_countries: ["IT","DE","FR","ES","NL","BE","AT","CH","GB","US"],
       },
-    },
-  })),
+      billing_address_collection: "required", // o "auto"
+      phone_number_collection: { enabled: true },
 
-  // ✅ 1. indirizzo di spedizione
-  shipping_address_collection: {
-    allowed_countries: ['IT','DE','FR','ES','NL','BE','AT','CH','GB','US']
-  },
+      // campo extra
+      custom_fields: [
+        {
+          key: "note",
+          label: { type: "custom", custom: "Note per la consegna / regalo" },
+          type: "text",
+          optional: true,
+        },
+      ],
 
-  // ✅ 2. indirizzo di fatturazione (se lo vuoi sempre)
-  billing_address_collection: 'required', // oppure 'auto'
+      allow_promotion_codes: true,
 
-  // ✅ 3. telefono
-  phone_number_collection: { enabled: true },
+      // costo spedizione (opzionale)
+      shipping_options: [
+        {
+          shipping_rate_data: {
+            display_name: "Spedizione standard",
+            type: "fixed_amount",
+            fixed_amount: { amount: 1200, currency: "eur" }, // 12.00€
+            delivery_estimate: {
+              minimum: { unit: "business_day", value: 2 },
+              maximum: { unit: "business_day", value: 5 },
+            },
+          },
+        },
+      ],
 
-  // ✅ 4. campi extra in checkout (es. note per spedizione / regalo)
-  custom_fields: [
-    {
-      key: 'note',
-      label: { type: 'custom', custom: 'Note per la consegna / regalo' },
-      type: 'text',
-      optional: true,
-    }
-  ],
-
-  // ✅ 5. codici sconto
-  allow_promotion_codes: true,
-
-  // (opzionale) se vuoi far comparire “Spedizione” con costi, devi aggiungere shipping_options
-  shipping_options: [
-    { shipping_rate_data: { display_name: 'Spedizione standard', type: 'fixed_amount', fixed_amount: { amount: 1200, currency: 'eur' }, delivery_estimate: { minimum: { unit: 'business_day', value: 2 }, maximum: { unit: 'business_day', value: 5 } } } }
-   ],
-});
-
+      metadata: payload.metadata || undefined,
+    });
 
     return {
       statusCode: 200,
