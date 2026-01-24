@@ -106,14 +106,73 @@ exports.handler = async (event) => {
       };
     });
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      line_items,
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      // opzionale: metadata
-      metadata: payload.metadata || undefined,
-    });
+//    const session = await stripe.checkout.sessions.create({
+ //     mode: "payment",
+  //    line_items,
+   //   success_url: successUrl,
+    //  cancel_url: cancelUrl,
+//      // opzionale: metadata
+//      metadata: payload.metadata || undefined,
+//    });
+
+// Origin: usato per success/cancel URL (DEV + PROD)
+const origin =
+  (event.headers && (event.headers.origin || event.headers.Origin)) ||
+  (payload.origin || '');
+
+if (!origin) return { statusCode: 400, body: 'Missing origin' };
+
+// URL ASSOLUTE (Stripe le vuole assolute)
+const successUrl = `${origin}/netlify_stripe-success.html?session_id={CHECKOUT_SESSION_ID}#catalogue`;
+const cancelUrl  = `${origin}/netlify_stripe-cancel.html#catalogue`;
+
+const session = await stripe.checkout.sessions.create({
+  mode: 'payment',
+  success_url: successUrl,
+  cancel_url: cancelUrl,
+
+  line_items: items.map((it) => ({
+    quantity: Math.max(1, Number(it.quantity || 1)),
+    price_data: {
+      currency: String(it.currency || 'eur').toLowerCase(),
+      unit_amount: Number(it.unit_amount),
+      product_data: {
+        name: String(it.name || 'Item').slice(0, 120),
+        images: it.image ? [String(it.image)] : undefined,
+      },
+    },
+  })),
+
+  // ✅ 1. indirizzo di spedizione
+  shipping_address_collection: {
+    allowed_countries: ['IT','DE','FR','ES','NL','BE','AT','CH','GB','US']
+  },
+
+  // ✅ 2. indirizzo di fatturazione (se lo vuoi sempre)
+  billing_address_collection: 'required', // oppure 'auto'
+
+  // ✅ 3. telefono
+  phone_number_collection: { enabled: true },
+
+  // ✅ 4. campi extra in checkout (es. note per spedizione / regalo)
+  custom_fields: [
+    {
+      key: 'note',
+      label: { type: 'custom', custom: 'Note per la consegna / regalo' },
+      type: 'text',
+      optional: true,
+    }
+  ],
+
+  // ✅ 5. codici sconto
+  allow_promotion_codes: true,
+
+  // (opzionale) se vuoi far comparire “Spedizione” con costi, devi aggiungere shipping_options
+  shipping_options: [
+    { shipping_rate_data: { display_name: 'Spedizione standard', type: 'fixed_amount', fixed_amount: { amount: 1200, currency: 'eur' }, delivery_estimate: { minimum: { unit: 'business_day', value: 2 }, maximum: { unit: 'business_day', value: 5 } } } }
+   ],
+});
+
 
     return {
       statusCode: 200,
