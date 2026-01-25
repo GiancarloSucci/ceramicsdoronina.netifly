@@ -100,6 +100,31 @@ exports.handler = async (event) => {
       };
     });
 
+    // ─────────────────────────────────────────────
+    // SHIPPING (EU only): 40€ < 200€, 20€ < 500€, 0€ >= 500€
+    // ─────────────────────────────────────────────
+    const subtotalCents = line_items.reduce((sum, li) => {
+      const unit = Number(li?.price_data?.unit_amount || 0);
+      const qty = Math.max(1, Number(li?.quantity || 1));
+      return sum + unit * qty;
+    }, 0);
+    
+    let shippingCents = 0;
+    if (subtotalCents < 20000) shippingCents = 4000;
+    else if (subtotalCents < 50000) shippingCents = 2000;
+    
+    // Aggiungi una riga “Shipping” solo se > 0
+    if (shippingCents > 0) {
+      line_items.push({
+        quantity: 1,
+        price_data: {
+          currency: "eur",
+          unit_amount: shippingCents,
+          product_data: { name: "Shipping" },
+        },
+      });
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items,
@@ -108,7 +133,10 @@ exports.handler = async (event) => {
 
       // spedizione / fatturazione / contatti
       shipping_address_collection: {
-        allowed_countries: ["IT","DE","FR","ES","NL","BE","AT","CH","GB","US"],
+        allowed_countries: [
+          "AT","BE","BG","HR","CY","CZ","DK","EE","FI","FR","DE","GR","HU","IE","IT",
+          "LV","LT","LU","MT","NL","PL","PT","RO","SK","SI","ES","SE","NO","CH"
+        ]
       },
       billing_address_collection: "required", // o "auto"
       phone_number_collection: { enabled: true },
@@ -124,21 +152,6 @@ exports.handler = async (event) => {
       ],
 
       allow_promotion_codes: true,
-
-      // costo spedizione (opzionale)
-      shipping_options: [
-        {
-          shipping_rate_data: {
-            display_name: "Spedizione standard",
-            type: "fixed_amount",
-            fixed_amount: { amount: 1200, currency: "eur" }, // 12.00€
-            delivery_estimate: {
-              minimum: { unit: "business_day", value: 2 },
-              maximum: { unit: "business_day", value: 5 },
-            },
-          },
-        },
-      ],
 
       metadata: payload.metadata || undefined,
     });
