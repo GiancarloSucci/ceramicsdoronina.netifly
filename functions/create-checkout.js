@@ -59,6 +59,8 @@ exports.handler = async (event) => {
     const payload = event.body ? JSON.parse(event.body) : {};
     const items = payload.items || payload.lineItems || [];
 
+    const needsShipping = items.some(it => it && it.requires_shipping === true);
+
     // dove tornare dopo checkout (PROD: ceramicsdoronina.it)
     const returnBase = String(payload.return_base || "").trim() || origin;
 
@@ -109,20 +111,22 @@ exports.handler = async (event) => {
       return sum + unit * qty;
     }, 0);
     
-    let shippingCents = 0;
-    if (subtotalCents < 20000) shippingCents = 4000;
-    else if (subtotalCents < 50000) shippingCents = 2000;
-    
-    // Aggiungi una riga “Shipping” solo se > 0
-    if (shippingCents > 0) {
-      line_items.push({
-        quantity: 1,
-        price_data: {
-          currency: "eur",
-          unit_amount: shippingCents,
-          product_data: { name: "Shipping" },
-        },
-      });
+    if (needsShipping) {
+        let shippingCents = 0;
+        if (subtotalCents < 20000) shippingCents = 4000;
+        else if (subtotalCents < 50000) shippingCents = 2000;
+        
+        // Aggiungi una riga “Shipping” solo se > 0
+        if (shippingCents > 0) {
+          line_items.push({
+            quantity: 1,
+            price_data: {
+              currency: "eur",
+              unit_amount: shippingCents,
+              product_data: { name: "Shipping" },
+            },
+          });
+        }
     }
 
     const session = await stripe.checkout.sessions.create({
