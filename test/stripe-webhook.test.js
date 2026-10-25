@@ -1,50 +1,301 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { makeHandler, buildOrderSummary, notifyOwner } = require("../functions/stripe-webhook.js");
+const { makeHandler, buildOrderSummary, notifyOwner, clean } = require("../functions/stripe-webhook.js");
 
 const session = {
-  id: "cs_1", amount_total: 12345, currency: "eur", metadata: { item_ids: "v1,mc1" },
-  customer_details: { email: "a@b.it", name: "Ann", phone: "+39" },
+  id: "cs_1", amount_total: 12345, currency: "eur", payment_status: "paid", metadata: { item_ids: "v1,mc1" },
+  customer_details: { email: "a@b.it", name: "Ann", phone: "+39", address: { line1: "Via Fatturazione 9", city: "Roma", postal_code: "00100", country: "IT" } },
   shipping_details: { name: "Ann", address: { line1: "Via 1", city: "Genova", postal_code: "16100", country: "IT" } },
   custom_fields: [{ key: "note", text: { value: "gift" } }],
 };
+const digital = { ...session, id: "cs_d", shipping_details: undefined, customer_details: { email: "d@b.it", name: "Dan", address: { country: "FR" } } };
 const env = { STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_x" };
-const fake = (evt) => ({
-  webhooks: { constructEvent: (raw, sig, secret) => { if (sig !== "good" || secret !== "whsec_x") throw new Error("bad"); return evt; } },
-  checkout: { sessions: { listLineItems: async () => ({ data: [{ description: "Vaso", quantity: 1 }] }) } },
+const evtOf = (type, obj = session) => ({ id: "evt_1", type, data: { object: obj } });
+
+// constructEvent asserts the EXACT raw string it is given (signature verification depends on it)
+const fake = (evt, { expectRaw, listFails } = {}) => ({
+  webhooks: {
+    constructEvent: (raw, sig, secret) => {
+      if (expectRaw !== undefined) assert.strictEqual(raw, expectRaw);
+      if (sig !== "good" || secret !== "whsec_x") throw Object.assign(new Error("No signatures found matching"), { type: "StripeSignatureVerificationError" });
+      return evt;
+    },
+  },
+  checkout: {
+    sessions: {
+      listLineItems: async () => {
+        if (listFails) throw new Error("boom");
+        return { data: [{ description: "Vaso", quantity: 1 }] };
+      },
+    },
+  },
 });
 const req = (o = {}) => ({ httpMethod: "POST", headers: { "stripe-signature": "good" }, body: "{}", ...o });
 
-test("buildOrderSummary", () => {
+function capture() {
+  const logs = [];
+  const orig = { e: console.error, i: console.info, w: console.warn };
+  console.error = (m) => logs.push(["error", String(m)]);
+  console.info = (m) => logs.push(["info", String(m)]);
+  console.warn = (m) => logs.push(["warn", String(m)]);
+  return { logs, restore: () => Object.assign(console, { error: orig.e, info: orig.i, warn: orig.w }) };
+}
+const parsed = (cap, ev) => cap.logs.filter(([, l]) => l.includes(`"event":"${ev}"`)).map(([lvl, l]) => [lvl, JSON.parse(l)]);
+
+test("buildOrderSummary: paid physical order", () => {
   const s = buildOrderSummary(session, [{ description: "Vaso", quantity: 1 }], "v1,mc1");
-  for (const part of ["cs_1", "a@b.it", "Via 1", "1 x Vaso", "v1,mc1", "123.45 EUR", "gift"]) assert.ok(s.includes(part), part);
+  for (const part of ["New paid order", "cs_1", "a@b.it", "Ship to: Ann, Via 1, 16100 Genova, IT", "Billing: Ann, Via Fatturazione 9", "1 x Vaso", "v1,mc1", "123.45 EUR", "gift"]) assert.ok(s.includes(part), part);
+  assert.ok(!s.includes("Shipping: none"));
 });
 
-test("405, bad signature 400", async () => {
-  const h = makeHandler({ stripeFactory: () => fake({}), env, notify: async () => {} });
-  assert.equal((await h({ httpMethod: "GET", headers: {} })).statusCode, 405);
-  assert.equal((await h(req({ headers: { "stripe-signature": "bad" } }))).statusCode, 400);
+test("digital order: says no shipping address, no 'Ship to', billing separate", () => {
+  const s = buildOrderSummary(digital, [], "mc1");
+  assert.ok(s.includes("Shipping: none (digital order)"));
+  assert.ok(!s.includes("Ship to"));
+  assert.ok(s.includes("Billing: Dan, FR"));
 });
 
-test("completed event notifies owner; base64 body; other events ignored", async () => {
+test("405, bad signature 400 (logs type/message), header case variants", async () => {
+  const cap = capture();
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("other")), env, notify: async () => {} });
+    assert.equal((await h({ httpMethod: "GET", headers: {} })).statusCode, 405);
+    assert.equal((await h(req({ headers: { "stripe-signature": "bad" } }))).statusCode, 400);
+    assert.equal((await h(req({ headers: { "Stripe-Signature": "good" } }))).statusCode, 200);
+    assert.equal((await h(req({ headers: { "STRIPE-SIGNATURE": "good" } }))).statusCode, 200);
+  } finally {
+    cap.restore();
+  }
+  const [[, bad]] = parsed(cap, "webhook_bad_signature");
+  assert.equal(bad.type, "StripeSignatureVerificationError");
+  assert.ok(bad.message.includes("No signatures"));
+  assert.ok(bad.request_id);
+});
+
+test("signature check receives the exact raw body: plain and base64, non-ASCII", async () => {
+  const body = '{"id":"evt_1","name":"Zoë €  Ωmega ☕","n":1}';
   const sent = [];
-  const evt = { id: "evt_1", type: "checkout.session.completed", data: { object: session } };
-  const h = makeHandler({ stripeFactory: () => fake(evt), env, notify: async (s) => sent.push(s) });
-  const r = await h(req({ isBase64Encoded: true, body: Buffer.from("{}").toString("base64") }));
+  const evt = evtOf("checkout.session.completed");
+  for (const mk of [
+    () => req({ body }),
+    () => req({ isBase64Encoded: true, body: Buffer.from(body, "utf8").toString("base64") }),
+  ]) {
+    const h = makeHandler({ stripeFactory: () => fake(evt, { expectRaw: body }), env, notify: async (s) => sent.push(s) });
+    assert.equal((await h(mk())).statusCode, 200);
+  }
+  assert.equal(sent.length, 2);
+});
+
+test("completed event notifies owner; other events ignored", async () => {
+  const sent = [];
+  const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed")), env, notify: async (s) => sent.push(s) });
+  const r = await h(req());
   assert.equal(r.statusCode, 200);
+  assert.ok(r.headers["x-request-id"]);
   assert.equal(sent.length, 1);
-  assert.ok(sent[0].includes("cs_1"));
+  assert.ok(sent[0].startsWith("New paid order") && sent[0].includes("cs_1"));
   const h2 = makeHandler({ stripeFactory: () => fake({ id: "e", type: "other", data: { object: {} } }), env, notify: async (s) => sent.push(s) });
   assert.equal((await h2(req())).statusCode, 200);
   assert.equal(sent.length, 1);
 });
 
-test("notify failure -> 500 so Stripe retries; notifyOwner posts when URL set", async () => {
-  const evt = { id: "evt_1", type: "checkout.session.completed", data: { object: session } };
-  const h = makeHandler({ stripeFactory: () => fake(evt), env, notify: async () => { throw new Error("x"); } });
-  assert.equal((await h(req())).statusCode, 500);
+test("unpaid completed -> AWAITING PAYMENT; async succeeded -> paid; async failed -> failure", async () => {
+  const run = async (type, obj) => {
+    const sent = [];
+    const h = makeHandler({ stripeFactory: () => fake(evtOf(type, obj)), env, notify: async (s) => sent.push(s) });
+    assert.equal((await h(req())).statusCode, 200);
+    return sent[0];
+  };
+  const unpaid = { ...session, payment_status: "unpaid" };
+  let s = await run("checkout.session.completed", unpaid);
+  assert.ok(s.startsWith("AWAITING PAYMENT, do not ship") && !s.includes("New paid order"));
+  s = await run("checkout.session.async_payment_succeeded", session);
+  assert.ok(s.startsWith("New paid order"));
+  s = await run("checkout.session.async_payment_succeeded", unpaid);
+  assert.ok(s.startsWith("New paid order"), "async_payment_succeeded event itself confirms payment");
+  s = await run("checkout.session.async_payment_failed", unpaid);
+  assert.ok(s.startsWith("PAYMENT FAILED, do not ship"));
+  s = await run("checkout.session.completed", { ...session, payment_status: "no_payment_required", amount_total: 0 });
+  assert.ok(s.startsWith("New paid order"), "100% promo code order is not blocked");
+});
+
+test("missing STRIPE_WEBHOOK_SECRET or key -> 500; stripeFactory throwing -> generic 500", async () => {
+  const cap = capture();
+  try {
+    for (const e of [{ STRIPE_SECRET_KEY: "sk_test_x" }, { STRIPE_WEBHOOK_SECRET: "whsec_x" }]) {
+      const r = await makeHandler({ stripeFactory: () => fake({}), env: e, notify: async () => {} })(req());
+      assert.equal(r.statusCode, 500);
+      assert.ok(!r.body.includes("STRIPE") && !r.body.includes("whsec"));
+    }
+    const r = await makeHandler({ stripeFactory: () => { throw new Error("Cannot find module 'stripe' sk_test_LEAK"); }, env, notify: async () => {} })(req());
+    assert.equal(r.statusCode, 500);
+    assert.equal(JSON.parse(r.body).error, "server_error");
+  } finally {
+    cap.restore();
+  }
+  const [[lvl, u]] = parsed(cap, "unexpected_error");
+  assert.equal(lvl, "error");
+  assert.ok(!JSON.stringify(u).includes("LEAK"));
+  assert.ok(parsed(cap, "config_missing").every(([l]) => l === "error"));
+});
+
+test("listLineItems failure still notifies and returns 200", async () => {
+  const sent = [];
+  const cap = capture();
+  let r;
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed"), { listFails: true }), env, notify: async (s) => sent.push(s) });
+    r = await h(req());
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.statusCode, 200);
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0].includes("v1,mc1"));
+  assert.equal(parsed(cap, "list_line_items_failed").length, 1);
+});
+
+test("notify failure -> 500 so Stripe retries; log has name+truncated redacted message", async () => {
+  const cap = capture();
+  let r;
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed")), env, notify: async () => { throw new Error("x sk_live_ABC " + "y".repeat(500)); } });
+    r = await h(req());
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.statusCode, 500);
+  const [[, o]] = parsed(cap, "webhook_processing_failed");
+  assert.equal(o.name, "Error");
+  assert.ok(o.message.length <= 200 && !o.message.includes("sk_live_ABC"));
+  assert.equal(o.session_id, "cs_1");
+  assert.ok(o.request_id);
+});
+
+test("notifyOwner: non-ok status throws; posts with timeout signal and redirect error", async () => {
+  await assert.rejects(
+    notifyOwner("hello", { OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/x" }, async () => ({ ok: false, status: 503 })),
+    /notify_webhook_status_503/
+  );
   const posts = [];
-  await notifyOwner("hello", { OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/x" }, async (u, o) => { posts.push([u, o]); return { ok: true }; });
-  assert.equal(posts.length, 1);
+  const delivered = await notifyOwner("hello", { OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/x" }, async (u, o) => { posts.push([u, o]); return { ok: true }; }, "rid");
+  assert.equal(delivered, true);
   assert.equal(JSON.parse(posts[0][1].body).summary, "hello");
+  assert.equal(posts[0][1].redirect, "error");
+  assert.ok(posts[0][1].signal instanceof AbortSignal);
+});
+
+test("notifyOwner: non-https URL is skipped with notify_config_invalid; no fetch", async () => {
+  const cap = capture();
+  let called = false;
+  let delivered;
+  try {
+    delivered = await notifyOwner("hello", { OWNER_NOTIFY_WEBHOOK_URL: "http://hook.example/x" }, async () => { called = true; return { ok: true }; }, "rid");
+  } finally {
+    cap.restore();
+  }
+  assert.equal(delivered, false);
+  assert.equal(called, false);
+  assert.equal(parsed(cap, "notify_config_invalid").length, 1);
+});
+
+test("notifyOwner: fetch failure rethrown without the URL", async () => {
+  const err = Object.assign(new TypeError("fetch failed https://hook.example/SECRETPATH"), { cause: { code: "ECONNREFUSED" } });
+  let thrown;
+  try {
+    await notifyOwner("hello", { OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/SECRETPATH" }, async () => { throw err; });
+  } catch (e) {
+    thrown = e;
+  }
+  assert.equal(thrown.name, "NotifyFetchError");
+  assert.equal(thrown.code, "ECONNREFUSED");
+  assert.ok(!String(thrown.message).includes("SECRETPATH"));
+  // through the handler: log has name/code only
+  const cap = capture();
+  try {
+    const h = makeHandler({
+      stripeFactory: () => fake(evtOf("checkout.session.completed")),
+      env: { ...env, OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/SECRETPATH" },
+      notify: (s, e) => notifyOwner(s, e, async () => { throw err; }),
+    });
+    assert.equal((await h(req())).statusCode, 500);
+  } finally {
+    cap.restore();
+  }
+  assert.ok(!cap.logs.map((l) => l[1]).join("\n").includes("SECRETPATH"));
+  const [[, o]] = parsed(cap, "webhook_processing_failed");
+  assert.equal(o.name, "NotifyFetchError");
+  assert.equal(o.code, "ECONNREFUSED");
+  assert.equal(o.message, undefined);
+});
+
+test("no OWNER_NOTIFY_WEBHOOK_URL: owner_notify_not_configured warn with ids, no PII; PII-free line kept", async () => {
+  const cap = capture();
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed")), env, notify: async () => {} });
+    assert.equal((await h(req())).statusCode, 200);
+    await makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed", digital)), env })(req()); // real notifyOwner: log line only
+  } finally {
+    cap.restore();
+  }
+  const ev = parsed(cap, "owner_notify_not_configured");
+  assert.equal(ev.length, 2);
+  const [lvl, o] = ev[0];
+  assert.equal(lvl, "warn");
+  assert.deepEqual(
+    { session_id: o.session_id, event_id: o.event_id, item_ids: o.item_ids, amount_total: o.amount_total, currency: o.currency, payment_status: o.payment_status, country: o.country },
+    { session_id: "cs_1", event_id: "evt_1", item_ids: "v1,mc1", amount_total: 12345, currency: "eur", payment_status: "paid", country: "IT" }
+  );
+  assert.equal(ev[1][1].country, "FR");
+  const all = cap.logs.map((l) => l[1]).join("\n");
+  for (const pii of ["Ann", "a@b.it", "+39", "Via 1", "Genova", "gift", "Dan", "d@b.it"]) assert.ok(!all.includes(pii), "PII leaked: " + pii);
+  assert.ok(parsed(cap, "owner_notification").length >= 1);
+  assert.ok(parsed(cap, "order_completed").length >= 1);
+});
+
+test("with a valid OWNER_NOTIFY_WEBHOOK_URL there is no not-configured warning", async () => {
+  const cap = capture();
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed")), env: { ...env, OWNER_NOTIFY_WEBHOOK_URL: "https://hook.example/x" }, notify: async () => true });
+    assert.equal((await h(req())).statusCode, 200);
+  } finally {
+    cap.restore();
+  }
+  assert.equal(parsed(cap, "owner_notify_not_configured").length, 0);
+});
+
+test("every webhook log line carries request_id (header or generated)", async () => {
+  const cap = capture();
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed")), env });
+    await h(req({ headers: { "stripe-signature": "good", "x-nf-request-id": "nf-123" } }));
+    await h(req({ headers: { "stripe-signature": "bad" } }));
+  } finally {
+    cap.restore();
+  }
+  assert.ok(cap.logs.length >= 4);
+  for (const [, l] of cap.logs) assert.ok(JSON.parse(l).request_id, l);
+  assert.ok(cap.logs.some(([, l]) => JSON.parse(l).request_id === "nf-123"));
+});
+
+test("customer text is neutralised and capped", () => {
+  assert.equal(clean("<!channel> <@U123> <http://x.io|click> & @here"), "&lt;!channel&gt; &lt;@U123&gt; &lt;http://x.io|click&gt; &amp; @​here");
+  assert.equal(clean("@channel hi"), "@​channel hi");
+  assert.equal(clean("a@b.it"), "a@b.it");
+  assert.equal(clean("x".repeat(300)).length, 200);
+  assert.equal(clean("x".repeat(900), 500).length, 500);
+  const evil = {
+    ...session,
+    customer_details: { name: "<!channel>" + "n".repeat(300), email: "<http://evil|x>@a.it", phone: "p".repeat(300), address: { line1: "<@U1>", country: "IT" } },
+    shipping_details: { name: "@everyone", address: { line1: "L".repeat(400), city: "<!here>", country: "IT" } },
+    custom_fields: [{ key: "note", text: { value: "<!channel> " + "z".repeat(900) } }],
+  };
+  const s = buildOrderSummary(evil, [], "v1");
+  assert.ok(!s.includes("<!") && !s.includes("<http") && !s.includes("<@"));
+  const cust = s.split("\n").find((l) => l.startsWith("Customer:"));
+  assert.ok(cust.length < "Customer: ".length + 200 + 4 * 6 /* escapes */ + 200 + 200 + 20 + 200);
+  assert.ok(!s.includes("n".repeat(201)) && !s.includes("p".repeat(201)) && !s.includes("L".repeat(201)));
+  const note = s.split("\n").find((l) => l.startsWith("Note:"));
+  assert.ok(note.length <= "Note: ".length + 500 + 16);
+  assert.ok(s.includes("@​everyone"));
 });
