@@ -1,0 +1,23 @@
+{
+  "_doc": "Price strings and their expected euro cents. 'valid' and 'reject' must hold for BOTH the site JS parser (ceramicsdoronina/Stripe/js/money.js parseEuroToCents, which returns null) and the ODS build script (tools/build-catalogue.py cents(), which raises ValueError). 'numbers' are raw numeric ODS cells. 'jsOnly' formats are accepted by the browser parser only (display-side leniency); the build script is intentionally stricter. 'pythonQuirks' are accepted by cents() but rejected later by the generator (non-positive price is FATAL) or by JS.",
+  "valid": [
+    ["120", 12000],
+    ["120\u20ac", 12000],
+    ["\u20ac 120", 12000],
+    ["120,5", 12050],
+    ["120,50", 12050],
+    ["120.50", 12050],
+    ["0,99", 99],
+    ["1234", 123400],
+    ["19,99", 1999]
+  ],
+  "numbers": [[120, 12000], [19.99, 1999], [0.5, 50], [150.0, 15000]],
+  "reject": ["", "-", "abc", "-5", "1e3", "1.5.5", "12,34,56", "120,555", "12 0 EUR x", "1,2,3"],
+  "jsOnly": [
+    ["120 EUR", 12000],
+    ["1.234,56", 123456],
+    ["1,234.56", 123456],
+    ["1.234", 1234]
+  ],
+  "pythonQuirks": ["0", "0,00"]
+}

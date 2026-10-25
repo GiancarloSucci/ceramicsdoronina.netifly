@@ -1,6 +1,6 @@
 {
   "gc-150": {
-    "image": "images/catalogue/giftcard-150.jpg",
+    "image": "images/certificati/giftcard-150.jpg",
     "maxQty": 10,
     "name_en": "Gift Card €150",
     "name_it": "Carta regalo da 150€",
@@ -10,7 +10,7 @@
     "type": "digital"
   },
   "gc-200": {
-    "image": "images/catalogue/giftcard-200.jpg",
+    "image": "images/certificati/giftcard-200.jpg",
     "maxQty": 10,
     "name_en": "Gift Card €200",
     "name_it": "Carta regalo da 200€",
@@ -20,7 +20,7 @@
     "type": "digital"
   },
   "gc-300": {
-    "image": "images/catalogue/giftcard-300.jpg",
+    "image": "images/certificati/giftcard-300.jpg",
     "maxQty": 10,
     "name_en": "Gift Card €300",
     "name_it": "Carta regalo da 300€",
@@ -30,7 +30,7 @@
     "type": "digital"
   },
   "gc-50": {
-    "image": "images/catalogue/giftcard-50.jpg",
+    "image": "images/certificati/giftcard-50.jpg",
     "maxQty": 10,
     "name_en": "Gift Card €50",
     "name_it": "Carta regalo da 50€",
@@ -40,7 +40,7 @@
     "type": "digital"
   },
   "mc1": {
-    "image": "images/catalogue/workshop-disegni-airbnb-generico.1.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-generico.1.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
@@ -50,7 +50,7 @@
     "type": "digital"
   },
   "mc2": {
-    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.3.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-genova-minimalista.3.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
@@ -60,7 +60,7 @@
     "type": "digital"
   },
   "mc3": {
-    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.4.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-genova-minimalista.4.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
@@ -70,7 +70,7 @@
     "type": "digital"
   },
   "mc4": {
-    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.5.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-genova-minimalista.5.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
@@ -80,7 +80,7 @@
     "type": "digital"
   },
   "mc5": {
-    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.1.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-genova-minimalista.1.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
@@ -90,7 +90,7 @@
     "type": "digital"
   },
   "mc6": {
-    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.2.jpg",
+    "image": "images/masterclass/workshop-disegni-airbnb-genova-minimalista.2.jpg",
     "maxQty": 6,
     "name_en": "Paint Genoa on a ceramic plate",
     "name_it": "Dipingi Genova su un piatto di ceramica",
