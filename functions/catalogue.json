@@ -1,0 +1,232 @@
+{
+  "gc-150": {
+    "image": "images/catalogue/giftcard-150.jpg",
+    "maxQty": 10,
+    "name_en": "Gift Card €150",
+    "name_it": "Carta regalo da 150€",
+    "name_ru": "Подарочный сертификат 150€",
+    "priceCents": 15000,
+    "sold": false,
+    "type": "digital"
+  },
+  "gc-200": {
+    "image": "images/catalogue/giftcard-200.jpg",
+    "maxQty": 10,
+    "name_en": "Gift Card €200",
+    "name_it": "Carta regalo da 200€",
+    "name_ru": "Подарочный сертификат 200€",
+    "priceCents": 20000,
+    "sold": false,
+    "type": "digital"
+  },
+  "gc-300": {
+    "image": "images/catalogue/giftcard-300.jpg",
+    "maxQty": 10,
+    "name_en": "Gift Card €300",
+    "name_it": "Carta regalo da 300€",
+    "name_ru": "Подарочный сертификат 300€",
+    "priceCents": 30000,
+    "sold": false,
+    "type": "digital"
+  },
+  "gc-50": {
+    "image": "images/catalogue/giftcard-50.jpg",
+    "maxQty": 10,
+    "name_en": "Gift Card €50",
+    "name_it": "Carta regalo da 50€",
+    "name_ru": "Подарочный сертификат 50€",
+    "priceCents": 5000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc1": {
+    "image": "images/catalogue/workshop-disegni-airbnb-generico.1.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc2": {
+    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.3.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc3": {
+    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.4.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc4": {
+    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.5.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc5": {
+    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.1.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "mc6": {
+    "image": "images/catalogue/workshop-disegni-airbnb-genova-minimalista.2.jpg",
+    "maxQty": 6,
+    "name_en": "Paint Genoa on a ceramic plate",
+    "name_it": "Dipingi Genova su un piatto di ceramica",
+    "name_ru": "Нарисуйте Геную на керамической тарелке",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "digital"
+  },
+  "v1": {
+    "image": "images/catalogue/SaleMarina.V2.1.jpg",
+    "maxQty": 1,
+    "name_en": "Seasalt",
+    "name_it": "Sale Marino",
+    "name_ru": "Морская соль",
+    "priceCents": 15000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v10": {
+    "image": "images/catalogue/Vortice.1.jpg",
+    "maxQty": 1,
+    "name_en": "Vortex",
+    "name_it": "Vortice",
+    "name_ru": "Водоворот",
+    "priceCents": 6000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v11": {
+    "image": "images/catalogue/Ampolla.1.jpg",
+    "maxQty": 1,
+    "name_en": "Ampoule",
+    "name_it": "Ampolla",
+    "name_ru": "Сосуд",
+    "priceCents": 18000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v12": {
+    "image": "images/catalogue/LuiELei.1.jpg",
+    "maxQty": 1,
+    "name_en": "He and She",
+    "name_it": "Lui e Lei",
+    "name_ru": "Он и Она",
+    "priceCents": 20000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v13": {
+    "image": "images/catalogue/FarfallaSuiMagneti.1.jpg",
+    "maxQty": 1,
+    "name_en": "Butterfly on magnet",
+    "name_it": "Farfalla sui magneti",
+    "name_ru": "Бабочки на магнитах",
+    "priceCents": 23000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v2": {
+    "image": "images/catalogue/marmo.1.jpg",
+    "maxQty": 1,
+    "name_en": "Marmor",
+    "name_it": "Marmo",
+    "name_ru": "Мрамор",
+    "priceCents": 20000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v3": {
+    "image": "images/catalogue/Lilia.1.jpg",
+    "maxQty": 1,
+    "name_en": "Lilia",
+    "name_it": "Lilia",
+    "name_ru": "Лилиа",
+    "priceCents": 20000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v4": {
+    "image": "images/catalogue/PerleMarine.1.jpg",
+    "maxQty": 1,
+    "name_en": "Seapearls",
+    "name_it": "Perle Marine",
+    "name_ru": "Морской Жемчуг",
+    "priceCents": 10000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v5": {
+    "image": "images/catalogue/Perle.1.jpg",
+    "maxQty": 1,
+    "name_en": "Pearls",
+    "name_it": "Perle",
+    "name_ru": "Жемчуг",
+    "priceCents": 30000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v6": {
+    "image": "images/catalogue/Conchiglia.1.jpg",
+    "maxQty": 1,
+    "name_en": "Rakushka",
+    "name_it": "Conchiglia",
+    "name_ru": "Ракушка",
+    "priceCents": 25000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v7": {
+    "image": "images/catalogue/AccentoRosso.1.jpg",
+    "maxQty": 1,
+    "name_en": "Red Accent",
+    "name_it": "Accento Rosso",
+    "name_ru": "Красный Акцент",
+    "priceCents": 30000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v8": {
+    "image": "images/catalogue/Collana.1.jpg",
+    "maxQty": 1,
+    "name_en": "Collier",
+    "name_it": "Collana",
+    "name_ru": "Бусы",
+    "priceCents": 18000,
+    "sold": false,
+    "type": "physical"
+  },
+  "v9": {
+    "image": "images/catalogue/Inizio.1.jpg",
+    "maxQty": 1,
+    "name_en": "Beginning",
+    "name_it": "Inizio",
+    "name_ru": "Начало",
+    "priceCents": 12000,
+    "sold": false,
+    "type": "physical"
+  }
+}

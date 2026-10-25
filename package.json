@@ -2,6 +2,9 @@
   "name": "ceramicsdoronina-stripe-functions",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "stripe": "^14.0.0"
   }
