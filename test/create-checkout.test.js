@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { makeHandler, isOriginAllowed, parseAllowedOrigins, computeShippingCents, validateBody, buildLineItems } = require("../functions/create-checkout.js");
+const { makeHandler, isOriginAllowed, parseAllowedOrigins, computeShippingCents, validateBody, buildLineItems, buildSessionParams, normalizeSiteUrl, SHIPPING } = require("../functions/create-checkout.js");
+const { assertStripeRules, makeStripeFake } = require("./helpers/stripe-fake.js");
 
 const catalogue = {
   v1: { type: "physical", name_it: "Vaso", name_en: "Vase", name_ru: "Ваза", priceCents: 10000, sold: false, image: "images/catalogue/a b.jpg", maxQty: 1 },
@@ -17,8 +18,8 @@ const catalogue = {
 const ORIGIN = "https://ceramicsdoronina.it";
 
 function setup(over = {}) {
-  const calls = [];
-  const fake = { checkout: { sessions: { create: async (p) => { calls.push(p); if (over.throwErr) throw over.throwErr; return { id: "cs_1", url: "https://checkout.stripe.com/c/1" }; } } } };
+  // The fake enforces Stripe API rules (expires_at window, label/metadata limits, ...) on every call.
+  const { client: fake, calls } = makeStripeFake({ catalogue, now: () => 1_000_000_000_000, throwErr: over.throwErr });
   const env = { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_SECRETVALUE", ...over.env };
   const handler = makeHandler({ stripeFactory: () => fake, env, catalogue, soldList: ["vm"], now: () => 1_000_000_000_000 });
   return { calls, handler };
@@ -73,7 +74,7 @@ test("tampered client fields ignored; price from catalogue, eur forced", async (
   assert.equal(li.price_data.unit_amount, 10000);
   assert.equal(li.price_data.currency, "eur");
   assert.equal(li.price_data.product_data.name, "Vaso");
-  assert.equal(li.price_data.product_data.metadata.vase_id, "v1");
+  assert.equal(li.price_data.product_data.metadata.item_id, "v1");
   assert.equal(ship(calls[0]), 4000);
   assert.equal(calls[0].success_url, "https://ceramicsdoronina.it/stripe-success.html?session_id={CHECKOUT_SESSION_ID}");
   assert.equal(calls[0].cancel_url, "https://ceramicsdoronina.it/stripe-cancel.html");
@@ -85,36 +86,59 @@ test("SITE_URL env used, trailing slash stripped", async () => {
   assert.ok(calls[0].success_url.startsWith("https://shop.example/stripe-success.html"));
 });
 
-test("400 cases", async () => {
+test("400 table: exact error codes and item_id", async () => {
   const { handler, calls } = setup();
   const bad = [
-    { items: [{ id: "nope", quantity: 1 }] },
-    { items: [{ id: "vs", quantity: 1 }] },
-    { items: [{ id: "vm", quantity: 1 }] }, // sold.json
-    { items: [{ id: "v1", quantity: 2 }] },
-    { items: [{ id: "mc1", quantity: 7 }] },
-    { items: [{ id: "v1", quantity: 1 }, { id: "v1", quantity: 1 }] }, // merged -> 2 > maxQty
-    { items: [{ id: "v1", quantity: 0 }] },
-    { items: [{ id: "v1", quantity: -1 }] },
-    { items: [{ id: "v1", quantity: 1.5 }] },
-    { items: [{ id: "v1", quantity: "1" }] },
-    { items: [{ id: "../x", quantity: 1 }] },
-    { items: "abc" },
-    { items: [] },
-    { items: [null] },
-    { items: Array(21).fill({ id: "gc", quantity: 1 }) },
-    null,
-    [],
+    [{ items: [{ id: "nope", quantity: 1 }] }, "unknown_item", "nope"],
+    [{ items: [{ id: "vs", quantity: 1 }] }, "item_sold", "vs"],
+    [{ items: [{ id: "vm", quantity: 1 }] }, "item_sold", "vm"], // sold.json
+    [{ items: [{ id: "v1", quantity: 2 }] }, "quantity_too_high", "v1"],
+    [{ items: [{ id: "mc1", quantity: 7 }] }, "quantity_too_high", "mc1"],
+    [{ items: [{ id: "v1", quantity: 1 }, { id: "v1", quantity: 1 }] }, "quantity_too_high", "v1"], // merged
+    [{ items: [{ id: "v1", quantity: 0 }] }, "invalid_quantity", "v1"],
+    [{ items: [{ id: "v1", quantity: -1 }] }, "invalid_quantity", "v1"],
+    [{ items: [{ id: "v1", quantity: 1.5 }] }, "invalid_quantity", "v1"],
+    [{ items: [{ id: "v1", quantity: "1" }] }, "invalid_quantity", "v1"],
+    [{ items: [{ id: "../x", quantity: 1 }] }, "invalid_id", undefined],
+    [{ items: [{ id: 5, quantity: 1 }] }, "invalid_id", undefined],
+    [{ items: "abc" }, "invalid_items", undefined],
+    [{ items: [] }, "invalid_items", undefined],
+    [{ items: [null] }, "invalid_item", undefined],
+    [{ items: Array(31).fill({ id: "gc", quantity: 1 }) }, "invalid_items", undefined],
+    [null, "invalid_body", undefined],
+    [[], "invalid_body", undefined],
   ];
-  for (const b of bad) {
+  for (const [b, code, itemId] of bad) {
     const r = await handler(post(JSON.stringify(b)));
     assert.equal(r.statusCode, 400, JSON.stringify(b)?.slice(0, 60));
+    const body = JSON.parse(r.body);
+    assert.equal(body.error, code, JSON.stringify(b)?.slice(0, 60));
+    assert.equal(body.item_id, itemId, code);
+    assert.ok(body.request_id);
     assert.ok(r.headers["Access-Control-Allow-Origin"]);
   }
   for (const raw of ["{not json", "", undefined]) {
-    assert.equal((await handler(post(raw))).statusCode, 400);
+    const r = await handler(post(raw));
+    assert.equal(r.statusCode, 400);
+    assert.equal(JSON.parse(r.body).error, "invalid_json");
+    assert.ok(!("item_id" in JSON.parse(r.body)));
   }
   assert.equal(calls.length, 0);
+});
+
+test("base64 POST body and 30 distinct items accepted", async () => {
+  const { handler, calls } = setup();
+  const body = JSON.stringify({ items: [{ id: "v1", quantity: 1 }], locale: "ru" });
+  const r = await handler({ httpMethod: "POST", headers: { origin: ORIGIN }, isBase64Encoded: true, body: Buffer.from(body, "utf8").toString("base64") });
+  assert.equal(r.statusCode, 200);
+  assert.equal(calls[0].locale, "ru");
+  const big = {};
+  for (let i = 0; i < 30; i++) big["p" + i] = { type: "digital", name_it: "P" + i, priceCents: 5000, sold: false, image: "", maxQty: 1 };
+  const items = Object.keys(big).map((id) => ({ id, quantity: 1 }));
+  const { calls: c2, client } = (() => { const f = makeStripeFake({ catalogue: big, now: 1_000_000_000_000 }); return { calls: f.calls, client: f.client }; })();
+  const h2 = makeHandler({ stripeFactory: () => client, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: big, soldList: [], now: () => 1_000_000_000_000 });
+  assert.equal((await h2(post({ items }))).statusCode, 200);
+  assert.equal(c2[0].line_items.length, 30);
 });
 
 test("origin handling", async () => {
@@ -162,9 +186,9 @@ test("images only absolute https, encoded", async () => {
   const { handler, calls } = setup();
   await handler(post({ items: [{ id: "v1", quantity: 1 }] }));
   assert.deepEqual(calls[0].line_items[0].price_data.product_data.images, ["https://ceramicsdoronina.it/images/catalogue/a%20b.jpg"]);
-  const http = setup({ env: { SITE_URL: "http://insecure.example" } });
-  await http.handler(post({ items: [{ id: "v1", quantity: 1 }] }));
-  assert.equal(http.calls[0].line_items[0].price_data.product_data.images, undefined);
+  // http (localhost dev) never yields images; checked on the pure builder because the fake enforces https URLs
+  const local = buildSessionParams({ items: [{ id: "v1", quantity: 1 }], locale: "it", catalogue, siteUrl: "http://localhost:8888" });
+  assert.equal(local.params.line_items[0].price_data.product_data.images, undefined);
   const none = setup();
   await none.handler(post({ items: [{ id: "v3", quantity: 1 }] }));
   assert.equal("images" in none.calls[0].line_items[0].price_data.product_data, false);
@@ -213,4 +237,146 @@ test("locale picks product name", () => {
   const li = buildLineItems([{ id: "v1", quantity: 1 }], catalogue, "https://s.it", "en");
   assert.equal(li[0].price_data.product_data.name, "Vase");
   assert.throws(() => validateBody({ items: [{ id: "zz", quantity: 1 }] }, catalogue, []), { name: "ValidationError" });
+});
+
+// ---- R-006 / R-013 additions ----
+
+function captureLogs() {
+  const logs = [];
+  const orig = { e: console.error, i: console.info, w: console.warn };
+  console.error = (m) => logs.push(["error", String(m)]);
+  console.info = (m) => logs.push(["info", String(m)]);
+  console.warn = (m) => logs.push(["warn", String(m)]);
+  return { logs, restore: () => Object.assign(console, { error: orig.e, info: orig.i, warn: orig.w }) };
+}
+
+test("OPTIONS without origin -> 400, no CORS", async () => {
+  const r = await setup().handler({ httpMethod: "OPTIONS", headers: {} });
+  assert.equal(r.statusCode, 400);
+  assert.equal(r.headers["Access-Control-Allow-Origin"], undefined);
+});
+
+test("shipping display_name is localised", async () => {
+  for (const [loc, name] of [["it", "Spedizione"], ["en", "Shipping"], ["ru", "Доставка"], [undefined, "Spedizione"]]) {
+    const { handler, calls } = setup();
+    await handler(post({ items: [{ id: "v1", quantity: 1 }], locale: loc }));
+    assert.equal(calls[0].shipping_options[0].shipping_rate_data.display_name, name);
+  }
+  assert.deepEqual(SHIPPING.displayNames, { it: "Spedizione", en: "Shipping", ru: "Доставка" });
+});
+
+test("buildSessionParams called directly: pure, validates locale via validateBody", () => {
+  const { items, locale } = validateBody({ items: [{ id: "v1", quantity: 1 }], locale: "xx" }, catalogue, []);
+  assert.equal(locale, null);
+  const out = buildSessionParams({ items, locale: "en", catalogue, siteUrl: "https://s.it", now: () => 5_000_000 });
+  assert.equal(out.params.locale, "en");
+  assert.equal(out.params.expires_at, 5000 + 1860);
+  assert.equal(out.shippingCents, 4000);
+  assert.equal(out.subtotalCents, 10000);
+  assert.equal(out.itemIds, "v1");
+  assertStripeRules(out.params, { now: 5_000_000, catalogue });
+});
+
+test("metadata item_ids never cut mid-id: 20 long ids", async () => {
+  const cat = {};
+  const ids = [];
+  for (let i = 0; i < 20; i++) {
+    const id = ("long-id-" + String(i).padStart(2, "0") + "-").padEnd(40, "x");
+    ids.push(id);
+    cat[id] = { type: "digital", name_it: "N", priceCents: 5000, sold: false, image: "", maxQty: 1 };
+  }
+  const items = ids.map((id) => ({ id, quantity: 1 }));
+  const out = buildSessionParams({ items, locale: "it", catalogue: cat, siteUrl: "https://s.it" });
+  const v = out.params.metadata.item_ids;
+  assert.ok(v.length <= 500);
+  assert.equal(out.itemIdsTruncated, true);
+  const kept = v.split(",");
+  assert.equal(kept.length, 12); // 12*40 + 11 commas = 491; a 13th id would need 532
+  for (const k of kept) assert.ok(ids.includes(k), "cut id: " + k);
+  assert.deepEqual(kept, ids.slice(0, 12));
+  // short ids: nothing dropped
+  const short = buildSessionParams({ items: [{ id: "v1", quantity: 1 }], locale: "it", catalogue, siteUrl: "https://s.it" });
+  assert.equal(short.itemIdsTruncated, false);
+  // handler logs a warning
+  const cap = captureLogs();
+  try {
+    const f = makeStripeFake({ catalogue: cat, now: 1_000_000_000_000 });
+    const h = makeHandler({ stripeFactory: () => f.client, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: cat, soldList: [], now: () => 1_000_000_000_000 });
+    assert.equal((await h(post({ items }))).statusCode, 200);
+  } finally {
+    cap.restore();
+  }
+  assert.ok(cap.logs.some(([lvl, l]) => lvl === "warn" && l.includes("metadata_item_ids_truncated")));
+});
+
+test("SITE_URL validation: https required, localhost http only, else config_invalid 500", async () => {
+  assert.equal(normalizeSiteUrl(undefined), "https://ceramicsdoronina.it");
+  assert.equal(normalizeSiteUrl("https://x.example/"), "https://x.example");
+  assert.equal(normalizeSiteUrl("http://localhost:8888"), "http://localhost:8888");
+  for (const bad of ["http://insecure.example", "not a url", "ftp://x.example", "https://x.example/?a=1", "javascript:alert(1)"]) {
+    assert.equal(normalizeSiteUrl(bad), null, bad);
+    const cap = captureLogs();
+    let r;
+    try {
+      const { handler, calls } = setup({ env: { SITE_URL: bad } });
+      r = await handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+      assert.equal(calls.length, 0);
+    } finally {
+      cap.restore();
+    }
+    assert.equal(r.statusCode, 500, bad);
+    assert.equal(JSON.parse(r.body).error, "server_error");
+    assert.ok(!r.body.includes("SITE_URL"));
+    assert.ok(cap.logs.some(([lvl, l]) => lvl === "error" && l.includes("config_invalid")));
+  }
+});
+
+test("logging: origin_rejected truncated, config_missing error, item_id in validation_failed, 405 and missing-origin info, stripe_error param/message redacted", async () => {
+  const cap = captureLogs();
+  try {
+    const { handler } = setup();
+    const long = "https://evil.example/" + "a".repeat(500);
+    await handler(post({ items: [{ id: "v1", quantity: 1 }] }, { headers: { origin: long } }));
+    await handler(post({ items: [{ id: "nope", quantity: 1 }] }));
+    await handler({ httpMethod: "GET", headers: { origin: ORIGIN } });
+    await handler({ httpMethod: "POST", headers: {}, body: "{}" });
+    await setup({ env: { ALLOWED_ORIGINS: "" } }).handler(post({}));
+    await setup({ env: { STRIPE_SECRET_KEY: "" } }).handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+    const err = Object.assign(new Error("Bad param whsec_ABCDEF123 here"), { type: "StripeInvalidRequestError", code: "c", param: "line_items[0]", statusCode: 400 });
+    await setup({ throwErr: err }).handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+  } finally {
+    cap.restore();
+  }
+  const find = (ev) => cap.logs.filter(([, l]) => l.includes(`"event":"${ev}"`)).map(([lvl, l]) => [lvl, JSON.parse(l)]);
+  const [[lv1, rej]] = find("origin_rejected");
+  assert.equal(lv1, "warn");
+  assert.ok(rej.origin.length <= 200 && rej.origin.startsWith("https://evil.example/"));
+  assert.equal(find("validation_failed")[0][1].item_id, "nope");
+  assert.equal(find("method_not_allowed")[0][0], "info");
+  assert.equal(find("origin_missing")[0][0], "info");
+  const cm = find("config_missing");
+  assert.equal(cm.length, 2);
+  assert.ok(cm.every(([lvl]) => lvl === "error"));
+  const se = find("stripe_error")[0][1];
+  assert.equal(se.param, "line_items[0]");
+  assert.ok(se.message.includes("[redacted]") && !se.message.includes("ABCDEF123"));
+});
+
+test("unexpected_error logs truncated message and stack, response stays generic", async () => {
+  const cap = captureLogs();
+  let r;
+  try {
+    const bomb = { ...catalogue, v1: { ...catalogue.v1, priceCents: undefined, get name_it() { throw new Error("boom sk_live_ZZZ " + "x".repeat(400)); } } };
+    const h = makeHandler({ stripeFactory: () => makeStripeFake().client, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: bomb, soldList: [] });
+    r = await h(post({ items: [{ id: "v1", quantity: 1 }] }));
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.statusCode, 500);
+  assert.equal(JSON.parse(r.body).error, "server_error");
+  const line = cap.logs.find(([, l]) => l.includes("unexpected_error"));
+  assert.ok(line);
+  const o = JSON.parse(line[1]);
+  assert.ok(o.message.length <= 200 && !o.message.includes("ZZZ"));
+  assert.ok(typeof o.stack === "string" && o.stack.length <= 600);
 });
