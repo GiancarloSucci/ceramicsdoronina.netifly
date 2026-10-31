@@ -2,6 +2,8 @@
 # Usage: python3 -B -I tools/build-catalogue.py [--check] [path/to/ceramicsdoronina/catalogue]
 #   (no flag)  regenerate functions/catalogue.json
 #   --check    regenerate in memory and exit 1 with a diff if it differs from the committed file
+# Note: this file now only generates the OFFLINE FALLBACK snapshot; the live catalogue is the
+# published Google Sheet (functions/_catalogue-source.js, see README).
 # Note: functions/sold.json (manual list of ids) overrides/extends `sold` at runtime.
 import difflib, json, os, re, sys, unicodedata, zipfile
 import xml.etree.ElementTree as ET

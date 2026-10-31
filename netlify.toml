@@ -4,6 +4,6 @@
 
 [functions]
   node_bundler = "esbuild"
-  # catalogue.json / sold.json are require()d, so esbuild bundles them; listed
+  # catalogue.json / sold.json / _catalogue-source.js are require()d, so esbuild bundles them; listed
   # explicitly as a safety net.
   included_files = ["functions/catalogue.json", "functions/sold.json", "functions/_shared.js", "functions/_catalogue-source.js"]
