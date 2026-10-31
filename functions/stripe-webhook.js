@@ -23,6 +23,8 @@ const HANDLED = [
 const FIELD_MAX = 200;
 const NOTE_MAX = 500;
 const NOTIFY_TIMEOUT_MS = 5000;
+// Netlify sync functions stop at 10 s: marking (3 attempts x 5 s worst case) must not starve the owner notification.
+const MARK_DEADLINE_MS = 4000;
 
 // Neutralises chat-markup injection in customer-controlled text: escapes & < >
 // (so "<!channel>", "<http://..|x>" and "<@U1>" cannot form links or mentions) and
@@ -195,7 +197,11 @@ function makeHandler({
           const manual = `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually`;
           markSoldLocal(pieces); // sold at once, before the published CSV catches up
           localDone = true;
-          const r = await markSold(pieces, { fetchImpl, env });
+          let timer;
+          const deadline = new Promise((resolve) => {
+            timer = setTimeout(() => resolve({ ok: false, reason: "deadline" }), MARK_DEADLINE_MS);
+          });
+          const r = await Promise.race([markSold(pieces, { fetchImpl, env }), deadline]).finally(() => clearTimeout(timer));
           if (r && r.ok) {
             log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
             return "";
