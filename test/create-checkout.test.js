@@ -380,3 +380,48 @@ test("unexpected_error logs truncated message and stack, response stays generic"
   assert.ok(o.message.length <= 200 && !o.message.includes("ZZZ"));
   assert.ok(typeof o.stack === "string" && o.stack.length <= 600);
 });
+
+test("live catalogue: sheet-sold item is rejected, sheet price is what Stripe is charged", async () => {
+  const src = require("../functions/_catalogue-source.js");
+  src._reset();
+  const HEAD = "id,type,name_it,name_en,name_ru,price,image,maxQty,sold";
+  const csv = [HEAD, 'va,physical,Uno,One,Один,"120,50",images/a.jpg,1,', "vb,physical,Due,Two,Два,80,,1,TRUE", "vc,digital,Tre,Three,Три,10,,5,"].join("\n");
+  const env = { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x", CATALOGUE_CSV_URL: "https://docs.google.com/spreadsheets/d/e/T/pub?output=csv" };
+  const fetchImpl = async () => new Response(csv, { status: 200 });
+  const live = { va: { type: "physical", priceCents: 12050, maxQty: 1, sold: false, name_it: "Uno", image: "images/a.jpg" }, vb: { type: "physical", priceCents: 8000, maxQty: 1, sold: false, name_it: "Due", image: "" }, vc: { type: "digital", priceCents: 1000, maxQty: 5, sold: false, name_it: "Tre", image: "" } };
+  const f = makeStripeFake({ catalogue: live, now: () => 1_000_000_000_000 });
+  const h = makeHandler({ stripeFactory: () => f.client, env, fetchImpl, now: () => 1_000_000_000_000 });
+  const sold = await h(post({ items: [{ id: "vb", quantity: 1 }] }));
+  assert.equal(sold.statusCode, 400);
+  assert.deepEqual([JSON.parse(sold.body).error, JSON.parse(sold.body).item_id], ["item_sold", "vb"]);
+  const over = await h(post({ items: [{ id: "vc", quantity: 6 }] }));
+  assert.equal(JSON.parse(over.body).error, "quantity_too_high");
+  const unknown = await h(post({ items: [{ id: "v1", quantity: 1 }] })); // only in the snapshot, not in the sheet
+  assert.equal(JSON.parse(unknown.body).error, "unknown_item");
+  const ok = await h(post({ items: [{ id: "va", quantity: 1 }] }));
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(f.calls[0].line_items[0].price_data.unit_amount, 12050);
+  // a piece marked sold locally (just paid) is rejected before the published CSV catches up
+  src.markSoldLocal(["va"]);
+  const again = await h(post({ items: [{ id: "va", quantity: 1 }] }));
+  assert.equal(JSON.parse(again.body).error, "item_sold");
+  src._reset();
+});
+
+test("live catalogue: sheet unreachable falls back to the snapshot (checkout keeps working)", async () => {
+  const src = require("../functions/_catalogue-source.js");
+  src._reset();
+  const env = { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x", CATALOGUE_CSV_URL: "https://docs.google.com/spreadsheets/d/e/T/pub?output=csv" };
+  const snap = require("../functions/catalogue.json");
+  const f = makeStripeFake({ catalogue: snap, now: () => 1_000_000_000_000 });
+  const orig = console.warn;
+  console.warn = () => {};
+  try {
+    const h = makeHandler({ stripeFactory: () => f.client, env, fetchImpl: async () => { throw new Error("down"); }, now: () => 1_000_000_000_000 });
+    const r = await h(post({ items: [{ id: "gc-50", quantity: 1 }] }));
+    assert.equal(r.statusCode, 200, r.body);
+  } finally {
+    console.warn = orig;
+    src._reset();
+  }
+});
