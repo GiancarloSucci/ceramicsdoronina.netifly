@@ -299,3 +299,158 @@ test("customer text is neutralised and capped", () => {
   assert.ok(note.length <= "Note: ".length + 500 + 16);
   assert.ok(s.includes("@​everyone"));
 });
+
+// ---- marking unique pieces as sold ---------------------------------------
+
+const catSrc = require("../functions/_catalogue-source.js");
+const CAT = {
+  v1: { type: "physical", maxQty: 1, priceCents: 100, sold: false },
+  v3: { type: "physical", maxQty: 1, priceCents: 100, sold: false },
+  vm: { type: "physical", maxQty: 2, priceCents: 100, sold: false }, // multi-piece physical: not unique
+  mc1: { type: "digital", maxQty: 6, priceCents: 100, sold: false },
+  "gc-50": { type: "digital", maxQty: 10, priceCents: 100, sold: false },
+  dg: { type: "digital", maxQty: 1, priceCents: 100, sold: false }, // digital one-off: not a physical piece
+};
+const getCatalogue = async () => ({ items: CAT, source: "sheet" });
+const SECRET = "S3CRET-VALUE-XYZ";
+const wenv = { ...env, CATALOGUE_WRITE_URL: "https://script.google.com/macros/s/AKFY123/exec", CATALOGUE_WRITE_SECRET: SECRET };
+const sess = (ids, over = {}) => ({ ...session, metadata: { item_ids: ids }, ...over });
+
+async function run(type, obj, { markSold, e = wenv } = {}) {
+  const sent = [];
+  const marked = [];
+  const local = [];
+  const cap = capture();
+  let r;
+  try {
+    const h = makeHandler({
+      stripeFactory: () => fake(evtOf(type, obj)),
+      env: e,
+      notify: async (s) => sent.push(s),
+      getCatalogue,
+      markSold: markSold || (async (ids) => { marked.push(ids); return { ok: true, marked: ids }; }),
+      markSoldLocal: (ids) => local.push(ids),
+    });
+    r = await h(req());
+  } finally {
+    cap.restore();
+  }
+  return { r, sent, marked, local, cap };
+}
+
+test("paid order marks only unique physical pieces, in order, deduped", async () => {
+  const { r, sent, marked, local, cap } = await run("checkout.session.completed", sess("v3,mc1,v1,gc-50,vm,dg,v3,unknown"));
+  assert.equal(r.statusCode, 200);
+  assert.deepEqual(marked, [["v3", "v1"]]);
+  assert.deepEqual(local, [["v3", "v1"]]);
+  assert.ok(!sent[0].includes("ACTION"));
+  const [[lvl, o]] = parsed(cap, "sold_marked");
+  assert.equal(lvl, "info");
+  assert.deepEqual([o.ids, o.session_id, o.event_id], [["v3", "v1"], "cs_1", "evt_1"]);
+});
+
+test("async_payment_succeeded marks too; unpaid completed / async failed do not", async () => {
+  let x = await run("checkout.session.async_payment_succeeded", sess("v3", { payment_status: "unpaid" }));
+  assert.deepEqual(x.marked, [["v3"]]);
+  for (const [type, obj] of [["checkout.session.completed", sess("v3", { payment_status: "unpaid" })], ["checkout.session.async_payment_failed", sess("v3", { payment_status: "unpaid" })], ["checkout.session.completed", sess("v3", { payment_status: "requires_payment_method" })]]) {
+    x = await run(type, obj);
+    assert.equal(x.r.statusCode, 200);
+    assert.deepEqual([x.marked, x.local], [[], []], type + " " + obj.payment_status);
+    assert.ok(!x.sent[0].includes("ACTION"));
+  }
+});
+
+test("masterclass, gift cards and multi-piece/digital items never trigger marking", async () => {
+  const x = await run("checkout.session.completed", sess("mc1,gc-50,vm,dg"));
+  assert.equal(x.r.statusCode, 200);
+  assert.deepEqual([x.marked, x.local], [[], []]);
+  assert.ok(!x.sent[0].includes("ACTION"));
+  assert.equal(parsed(x.cap, "sold_mark_failed").length + parsed(x.cap, "sold_mark_not_configured").length, 0);
+});
+
+test("mark failure: still 200, local mark kept, warn event, ACTION line for the owner, secret never logged", async () => {
+  for (const mk of [async () => ({ ok: false, reason: "forbidden" }), async () => { throw new Error(`boom ${SECRET}`); }]) {
+    const x = await run("checkout.session.completed", sess("v3,v1"), { markSold: mk });
+    assert.equal(x.r.statusCode, 200);
+    assert.deepEqual(x.local, [["v3", "v1"]]);
+    assert.ok(x.sent[0].startsWith("New paid order"));
+    assert.ok(x.sent[0].endsWith("ACTION: mark v3, v1 as sold in the sheet manually"));
+    const [[lvl, o]] = parsed(x.cap, "sold_mark_failed");
+    assert.equal(lvl, "warn");
+    assert.deepEqual(o.ids, ["v3", "v1"]);
+    assert.ok(o.reason);
+    assert.ok(!x.cap.logs.some(([, l]) => l.includes(SECRET)), "secret leaked in logs");
+    assert.ok(!x.sent[0].includes(SECRET) && !x.r.body.includes(SECRET));
+  }
+});
+
+test("not configured: warn sold_mark_not_configured once, ACTION line, local mark, 200", async () => {
+  const sent = [];
+  const local = [];
+  let calls = 0;
+  const cap = capture();
+  let r;
+  try {
+    const h = makeHandler({ stripeFactory: () => fake(evtOf("checkout.session.completed", sess("v3"))), env, notify: async (s) => sent.push(s), getCatalogue, markSoldLocal: (i) => local.push(i), markSold: (ids, o) => { calls++; return catSrc.markSold(ids, { ...o, fetchImpl: async () => { throw new Error("must not fetch"); } }); } });
+    r = await h(req());
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.statusCode, 200);
+  assert.equal(calls, 1);
+  assert.equal(parsed(cap, "sold_mark_not_configured").length, 1);
+  assert.equal(parsed(cap, "sold_mark_failed").length, 0);
+  assert.ok(sent[0].endsWith("ACTION: mark v3 as sold in the sheet manually"));
+  assert.deepEqual(local, [["v3"]]);
+});
+
+test("end to end with the real markSold and a fake Apps Script fetch (redirect follow, retry on 5xx)", async () => {
+  catSrc._reset();
+  const posts = [];
+  let n = 0;
+  const fetchImpl = async (url, o) => {
+    posts.push([url, o]);
+    return ++n === 1 ? new Response("err", { status: 503 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"] }), { status: 200 });
+  };
+  const sent = [];
+  const cap = capture();
+  let r;
+  try {
+    const h = makeHandler({
+      stripeFactory: () => fake(evtOf("checkout.session.completed", sess("v3,mc1"))),
+      env: wenv, notify: async (s) => sent.push(s), getCatalogue, fetchImpl,
+      markSold: (ids, o) => catSrc.markSold(ids, { ...o, sleep: async () => {} }),
+    });
+    r = await h(req());
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.statusCode, 200);
+  assert.equal(posts.length, 2);
+  assert.deepEqual(JSON.parse(posts[1][1].body), { secret: SECRET, ids: ["v3"] });
+  assert.equal(posts[1][1].redirect, "follow");
+  assert.ok(!sent[0].includes("ACTION"));
+  assert.equal(parsed(cap, "sold_marked").length, 1);
+  assert.ok(!cap.logs.some(([, l]) => l.includes(SECRET) || l.includes("AKFY123")), "no secret or script URL token in logs");
+  catSrc._reset();
+});
+
+test("a just-marked piece is sold immediately in the catalogue source, even if the sheet lags", async () => {
+  catSrc._reset();
+  const csv = "id,type,name_it,name_en,name_ru,price,image,maxQty,sold\nv3,physical,A,A,A,10,,1,";
+  const h = makeHandler({
+    stripeFactory: () => fake(evtOf("checkout.session.completed", sess("v3"))),
+    env: { ...wenv, CATALOGUE_CSV_URL: "https://docs.google.com/spreadsheets/d/e/T/pub?output=csv" },
+    notify: async () => {},
+    fetchImpl: async (url) => (String(url).includes("docs.google.com") ? new Response(csv, { status: 200 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"] }), { status: 200 })),
+  });
+  const cap = capture();
+  try {
+    assert.equal((await h(req())).statusCode, 200);
+    const after = await catSrc.getCatalogue({ env: { CATALOGUE_CSV_URL: "https://docs.google.com/spreadsheets/d/e/T/pub?output=csv" }, fetchImpl: async () => new Response(csv, { status: 200 }), soldList: [] });
+    assert.equal(after.items.v3.sold, true);
+  } finally {
+    cap.restore();
+    catSrc._reset();
+  }
+});

@@ -3,13 +3,17 @@
 //   checkout.session.completed               paid -> "New paid order"; not yet paid -> "AWAITING PAYMENT, do not ship"
 //   checkout.session.async_payment_succeeded -> "New paid order" (payment confirmed)
 //   checkout.session.async_payment_failed    -> "PAYMENT FAILED, do not ship"
-// Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, OWNER_NOTIFY_WEBHOOK_URL (optional, https only).
+// Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, OWNER_NOTIFY_WEBHOOK_URL (optional, https only),
+// CATALOGUE_WRITE_URL / CATALOGUE_WRITE_SECRET (optional, see _catalogue-source.js).
+// Paid orders also mark the ordered one-off physical pieces (maxQty 1) as sold in the Google
+// Sheet. Marking problems never change the 200 answer to Stripe: the owner is told to mark by hand.
 // Idempotency: stateless. Stripe may retry/duplicate deliveries (same event.id);
 // the notification is informational only, so a duplicate is harmless. event.id is logged
 // so duplicates can be spotted. Customer PII (name, email, phone, address, note) is never
 // logged; only ids, totals, currency, payment status and country.
 const crypto = require("crypto");
 const { defaultStripeFactory, decodeBody, safeText } = require("./_shared.js");
+const catalogueSource = require("./_catalogue-source.js");
 
 const HANDLED = [
   "checkout.session.completed",
@@ -115,7 +119,21 @@ async function notifyOwner(summary, env = process.env, fetchImpl = globalThis.fe
   return true;
 }
 
-function makeHandler({ stripeFactory = defaultStripeFactory, env = process.env, notify = notifyOwner } = {}) {
+// Ids of the unique pieces (physical, maxQty 1) among the ordered catalogue ids.
+function uniquePieceIds(itemIds, items) {
+  const ids = String(itemIds || "").split(",").map((x) => x.trim()).filter(Boolean);
+  return [...new Set(ids)].filter((id) => Object.prototype.hasOwnProperty.call(items, id) && items[id].type === "physical" && items[id].maxQty === 1);
+}
+
+function makeHandler({
+  stripeFactory = defaultStripeFactory,
+  env = process.env,
+  notify = notifyOwner,
+  getCatalogue = catalogueSource.getCatalogue,
+  markSold = catalogueSource.markSold,
+  markSoldLocal = catalogueSource.markSoldLocal,
+  fetchImpl = globalThis.fetch,
+} = {}) {
   return async function handler(event) {
     const headers = event.headers || {};
     const lower = {};
@@ -165,6 +183,35 @@ function makeHandler({ stripeFactory = defaultStripeFactory, env = process.env, 
         log("warn", { event: "list_line_items_failed", session_id: session.id });
       }
       const itemIds = (session.metadata && session.metadata.item_ids) || "";
+      // Returns the "ACTION: ..." line for the owner when the sheet could not be marked, else "".
+      // Never throws: marking problems must not turn into a non-200 answer to Stripe.
+      const markPaidPieces = async (ids, sess, evt) => {
+        let pieces = [];
+        let localDone = false;
+        try {
+          const { items } = await getCatalogue({ fetchImpl, env });
+          pieces = uniquePieceIds(ids, items);
+          if (!pieces.length) return "";
+          const manual = `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually`;
+          markSoldLocal(pieces); // sold at once, before the published CSV catches up
+          localDone = true;
+          const r = await markSold(pieces, { fetchImpl, env });
+          if (r && r.ok) {
+            log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
+            return "";
+          }
+          const reason = (r && r.reason) || "unknown";
+          if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces });
+          else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, reason: safeText(reason, 60) });
+          return manual;
+        } catch (err) {
+          try {
+            if (pieces.length && !localDone) markSoldLocal(pieces);
+          } catch (_) {}
+          log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, reason: "error", name: err && err.name });
+          return pieces.length ? `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually` : "";
+        }
+      };
       const logNotConfigured = () => {
         // No PII here: this is the only trace the owner has when no channel is configured.
         const sd = session.shipping_details || session.collected_information?.shipping_details || null;
@@ -182,7 +229,13 @@ function makeHandler({ stripeFactory = defaultStripeFactory, env = process.env, 
         });
       };
       if (!env.OWNER_NOTIFY_WEBHOOK_URL) logNotConfigured();
-      const delivered = await notify(buildOrderSummary(session, lineItems, itemIds, kind), env, undefined, requestId);
+      let summary = buildOrderSummary(session, lineItems, itemIds, kind);
+      if (kind === "paid") {
+        // Stripe retries re-mark harmlessly (the Apps Script just sets sold=true again).
+        const manual = await markPaidPieces(itemIds, session, stripeEvent);
+        if (manual) summary += `\n${manual}`;
+      }
+      const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
       return res(200, { received: true });
@@ -201,3 +254,4 @@ exports.makeHandler = makeHandler;
 exports.buildOrderSummary = buildOrderSummary;
 exports.notifyOwner = notifyOwner;
 exports.clean = clean;
+exports.uniquePieceIds = uniquePieceIds;
