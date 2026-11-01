@@ -31,7 +31,7 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
   let physical = false;
   for (const li of params.line_items) {
     const pd = li.price_data.product_data;
-    assert.ok(Number.isInteger(li.price_data.unit_amount) && li.price_data.unit_amount >= 50, "unit_amount integer >= 50");
+    assert.ok(Number.isInteger(li.price_data.unit_amount) && li.price_data.unit_amount >= 50 && li.price_data.unit_amount <= 99999999, "unit_amount integer 50..99999999");
     assert.equal(li.price_data.currency, "eur");
     assert.ok(Number.isInteger(li.quantity) && li.quantity >= 1, "quantity integer >= 1");
     assert.ok(pd.name && pd.name.length <= 250, "product name");
@@ -41,8 +41,8 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
     }
     assertMetadata(pd.metadata || {}, "product");
     if (pd.metadata && pd.metadata.seats !== undefined) {
-      // masterclass booking: ONE line for the group, seats as a string 1..20
-      assert.match(pd.metadata.seats, /^([1-9]|1\d|20)$/, "seats metadata must be a string 1..20");
+      // masterclass booking: ONE line for the group, seats as a string 1..999
+      assert.match(pd.metadata.seats, /^[1-9]\d{0,2}$/, "seats metadata must be a string 1..999");
       assert.equal(li.quantity, 1, "masterclass line has quantity 1 (persons live in metadata.seats)");
     }
     if (catalogue && pd.metadata && catalogue[pd.metadata.item_id]?.type === "physical") physical = true;

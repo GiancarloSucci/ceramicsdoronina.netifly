@@ -7,8 +7,9 @@
 // commerce data (type, price, maxQty, image, sold: derived like tools/build-catalogue.py) AND
 // display data (whitelisted columns, exposed by functions/catalogue.js).
 // Masterclass tab, two schemas: the seat/group-price schema (columns seats_total, seats_booked,
-// price_1..price_20: the price is per BOOKING SIZE; with ONLY price_1 filled every size costs N x
-// price_1; seats_total blank = unlimited seats) and the LEGACY one (spots, price: linear price, no
+// price_1..price_20: the price is per BOOKING SIZE; with ONLY price_1 filled the pricing is LINEAR:
+// any number of persons N (up to MAX_PERSONS and Stripe's maximum amount) costs N x price_1;
+// seats_total blank = unlimited seats) and the LEGACY one (spots, price: linear price, no
 // seat tracking). Seats booked after a payment are written by the Apps Script and
 // also kept locally for 15 minutes, until the published CSV catches up.
 // The leading underscore keeps Netlify from treating this file as a function.
@@ -33,10 +34,12 @@ const MAX_CSV_BYTES = 256 * 1024;
 const WRITE_RETRIES = 2;
 const WRITE_BACKOFF_MS = 250;
 
+const { MAX_PERSONS, maxLinearPersons } = require("./_shared.js");
+
 const ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const MAX_PRICE_CENTS = 10000 * 100;
 const MAX_QTY = 100;
-const MAX_GROUP = 20; // masterclass booking size: 1..20 persons
+const MAX_GROUP = 20; // masterclass price table (price_1..price_20): sizes 1..20
 const MAX_SEATS = 9999; // seats_total / seats_booked
 const NAME_COLS = ["name_it", "name_en", "name_ru"];
 const PRICE_COLS = Array.from({ length: MAX_GROUP }, (_, i) => "price_" + (i + 1));
@@ -208,10 +211,10 @@ function validateRow(r) {
 }
 
 // Linear seat fields (legacy masterclass rows and snapshot items): N persons cost N x price, no
-// seat tracking (nothing booked), at most maxQty (and 20) persons per booking.
+// seat tracking (nothing booked), at most maxQty (and 20) persons per booking: a price table, not 'linear' pricing.
 function linearSeatFields(priceCents, maxQty) {
   const tiersCents = Array.from({ length: MAX_GROUP }, (_, i) => (i < maxQty ? priceCents * (i + 1) : null));
-  return { tiersCents, seatsTotal: maxQty, seatsBooked: 0, seatsFree: maxQty };
+  return { tiersCents, seatsTotal: maxQty, seatsBooked: 0, seatsFree: maxQty, pricing: "table" };
 }
 
 // Optional non-negative integer cell (1-4 digits); blank = `dflt` (may be null). Returns NaN when malformed.
@@ -223,8 +226,9 @@ function intCell(v, dflt, min, max) {
 }
 
 // Validates one row of the seat schema of the Masterclass tab. price_N = TOTAL price of a booking
-// of N persons. Rule A: with price_2..price_20 all blank (or absent) every size 1..20 costs N x price_1;
-// otherwise a blank price_N = N persons not bookable. seats_total blank = unlimited (seatsTotal and
+// of N persons. Rule A: with price_2..price_20 all blank (or absent) the pricing is 'linear': any
+// number of persons 1..maxPersons costs N x price_1 (tiersCents keeps the first 20 sizes);
+// otherwise ('table') only the sizes with a filled price_N (max 20) are bookable. seats_total blank = unlimited (seatsTotal and
 // seatsFree null). Returns {id, item} or {id, error}.
 function validateSeatsRow(r, tab) {
   const id = String(r.id || "").trim();
@@ -235,7 +239,9 @@ function validateSeatsRow(r, tab) {
   if (tiersCents.some((c, i) => (cells[i] && c === null) || (c !== null && (c <= 0 || c > MAX_PRICE_CENTS)))) return { id, error: "price" };
   const defined = tiersCents.filter((c) => c !== null);
   if (!defined.length) return { id, error: "price" };
-  if (tiersCents[0] !== null && defined.length === 1) tiersCents.forEach((_, i) => (tiersCents[i] = tiersCents[0] * (i + 1))); // rule A
+  const linear = tiersCents[0] !== null && defined.length === 1; // rule A
+  const linearCents = linear ? tiersCents[0] : null;
+  if (linear) tiersCents.forEach((_, i) => (tiersCents[i] = linearCents * (i + 1)));
   const seatsTotal = intCell(r.seats_total, null, 1, MAX_SEATS);
   if (Number.isNaN(seatsTotal)) return { id, error: "seats_total" };
   const seatsBooked = intCell(r.seats_booked, 0, 0, MAX_SEATS);
@@ -248,16 +254,16 @@ function validateSeatsRow(r, tab) {
   const file = String(r.img1 || "").trim();
   if (file && file !== "-" && (!IMAGE_RE.test(file) || file.includes(".."))) return { id, error: "image" };
   const image = file && file !== "-" ? tab.dir + file : "";
-  const maxGroup = tiersCents.reduce((m, c, i) => (c !== null ? i + 1 : m), 0);
+  // largest bookable group ignoring seats: linear = persons ceiling, table = highest filled size
+  const maxGroup = linear ? maxLinearPersons(linearCents) : tiersCents.reduce((m, c, i) => (c !== null ? i + 1 : m), 0);
   const seatsFree = seatsTotal === null ? null : Math.max(0, seatsTotal - seatsBooked);
-  return {
-    id,
-    item: {
-      type: "digital", ...names, priceCents: tiersCents[0] !== null ? tiersCents[0] : Math.min(...defined), image,
-      maxQty: Math.min(MAX_GROUP, seatsFree === null ? MAX_GROUP : seatsFree, maxGroup), sold: seatsFree === 0,
-      tiersCents, seatsTotal, seatsBooked, seatsFree, tracked: true, maxGroup, // tracked/maxGroup: internal, never exposed
-    },
+  const item = {
+    type: "digital", ...names, priceCents: tiersCents[0] !== null ? tiersCents[0] : Math.min(...defined), image,
+    maxQty: Math.min(seatsFree === null ? maxGroup : seatsFree, maxGroup), sold: seatsFree === 0,
+    tiersCents, seatsTotal, seatsBooked, seatsFree, pricing: linear ? "linear" : "table", tracked: true, maxGroup, // tracked/maxGroup: internal, never exposed
   };
+  if (linear) item.linearCents = linearCents;
+  return { id, item };
 }
 
 // Validates one row of a tab (object keyed by whitelisted headers); derivation mirrors
@@ -503,10 +509,12 @@ function publicItem(p, sold, localBooked = 0) {
   if (p.tracked) {
     seatsBooked += localBooked;
     seatsFree = p.seatsTotal === null ? null : Math.max(0, p.seatsTotal - seatsBooked); // null: unlimited, never sold out by seats
-    o.maxQty = Math.min(MAX_GROUP, seatsFree === null ? MAX_GROUP : seatsFree, p.maxGroup);
+    o.maxQty = Math.min(seatsFree === null ? p.maxGroup : seatsFree, p.maxGroup);
     o.sold = sold || seatsFree === 0;
   }
-  return Object.assign(o, { tiersCents: p.tiersCents.slice(), seatsTotal: p.seatsTotal, seatsBooked, seatsFree });
+  Object.assign(o, { tiersCents: p.tiersCents.slice(), seatsTotal: p.seatsTotal, seatsBooked, seatsFree, pricing: p.pricing });
+  if (p.pricing === "linear") o.linearCents = p.linearCents;
+  return o;
 }
 
 // Copies the items and applies sold.json plus the locally marked ids.
@@ -605,7 +613,7 @@ async function getTabbed(env, fetchImpl, nowMs, timeoutMs, soldList) {
 }
 
 // Returns {items: {id: {type,name_it,name_en,name_ru,priceCents,image,maxQty,sold[,tiersCents,
-// seatsTotal,seatsBooked,seatsFree: masterclass only]}}, source,
+// seatsTotal,seatsBooked,seatsFree,pricing[,linearCents]: masterclass only]}}, source,
 // sources: {vasi,masterclass,certificati}, tabs: {vasi,masterclass,certificati}} with source
 // "sheet" | "stale" | "snapshot" (worst of the tabs) and tabs.<tab> = {headers, rows} (display
 // data, null when that tab is served from the snapshot). Never throws.
@@ -640,7 +648,7 @@ function markSoldLocal(ids, { now = Date.now } = {}) {
 function markBookedLocal(bookings, { now = Date.now, sessionId } = {}) {
   const until = now() + LOCAL_SOLD_TTL_MS;
   for (const b of bookings || []) {
-    if (!b || !ID_RE.test(String(b.id)) || !Number.isInteger(b.seats) || b.seats < 1 || b.seats > MAX_GROUP) continue;
+    if (!b || !ID_RE.test(String(b.id)) || !Number.isInteger(b.seats) || b.seats < 1 || b.seats > MAX_PERSONS) continue;
     state.booked.set(`${sessionId || "?"}|${b.id}`, { id: String(b.id), seats: b.seats, until });
   }
 }
@@ -721,7 +729,7 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
     return { ok: false, reason };
   }
   if (!fetchImpl) return { ok: false, reason: "no_fetch" };
-  const book = (bookings || []).filter((b) => b && ID_RE.test(String(b.id)) && Number.isInteger(b.seats) && b.seats >= 1 && b.seats <= MAX_GROUP).map((b) => ({ id: String(b.id), seats: b.seats }));
+  const book = (bookings || []).filter((b) => b && ID_RE.test(String(b.id)) && Number.isInteger(b.seats) && b.seats >= 1 && b.seats <= MAX_PERSONS).map((b) => ({ id: String(b.id), seats: b.seats }));
   // Contract v2 adds session_id and bookings (v3 customer); with ids only the payload is the one of the first version.
   const body = book.length ? { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book } : { secret, ids: [...ids] };
   if (book.length && customer && (customer.email || customer.name)) body.customer = { email: String(customer.email || ""), name: String(customer.name || ""), locale: ["it", "en", "ru"].includes(customer.locale) ? customer.locale : "it" };

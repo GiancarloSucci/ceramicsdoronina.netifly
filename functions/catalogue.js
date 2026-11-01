@@ -5,7 +5,9 @@
 //    items:[{id,type,name_it,name_en,name_ru,priceCents,image,maxQty,sold}],   (as in version 1)
 //    tabs:{vasi,masterclass,certificati}}   each {headers:[...], rows:[{header: value}]} or null
 // Masterclass items add tiersCents (total cents of a booking of 1..20 persons, null = not bookable),
-// seatsTotal, seatsBooked, seatsFree (seatsTotal and seatsFree are null = unlimited seats); maxQty is then the largest bookable group. Masterclass rows
+// seatsTotal, seatsBooked, seatsFree (seatsTotal and seatsFree are null = unlimited seats), pricing
+// ("linear": any number of persons up to maxQty costs N x linearCents, only price_1 filled; "table": only the
+// sizes of tiersCents are bookable) and, when linear, linearCents; maxQty is then the largest bookable group. Masterclass rows
 // (seat schema) carry the effective seats_booked (sheet + paid bookings the CSV does not show yet)
 // and one COMPUTED field, seats_free ("" = unlimited; the only field not taken from the sheet).
 // tabs hold the whitelisted display columns of the sheet tabs (never shopify_variant_id or notes);
@@ -17,7 +19,7 @@ const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
 const { safeText } = require("./_shared.js");
 
 const FIELDS = ["type", "name_it", "name_en", "name_ru", "priceCents", "image", "maxQty", "sold"];
-const SEAT_FIELDS = ["tiersCents", "seatsTotal", "seatsBooked", "seatsFree"]; // masterclass items only
+const SEAT_FIELDS = ["tiersCents", "seatsTotal", "seatsBooked", "seatsFree", "pricing"]; // masterclass items only
 
 function makeHandler({ env = process.env, getCatalogue = defaultGetCatalogue, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   return async function handler(event) {
@@ -44,6 +46,7 @@ function makeHandler({ env = process.env, getCatalogue = defaultGetCatalogue, fe
           const o = { id };
           for (const k of FIELDS) o[k] = items[id][k];
           if (items[id].tiersCents) for (const k of SEAT_FIELDS) o[k] = items[id][k];
+          if (items[id].pricing === "linear") o.linearCents = items[id].linearCents;
           return o;
         });
       const same = (v) => ({ vasi: v, masterclass: v, certificati: v });

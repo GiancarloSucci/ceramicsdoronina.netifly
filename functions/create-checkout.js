@@ -3,12 +3,13 @@
 // Prices, names, images and item type come ONLY from the server-side catalogue
 // (the published Google Sheet via functions/_catalogue-source.js, falling back to the
 // snapshot functions/catalogue.json). The client payload is never trusted for money. See README.md for the full contract.
-// Masterclass items (catalogue item with tiersCents): `quantity` means PERSONS (1..20) and the price is the
-// tier of that group size, charged as ONE Stripe line (quantity 1). Seats still free = seatsFree minus the
+// Masterclass items (catalogue item with tiersCents): `quantity` means PERSONS and the price is the
+// tier of that group size (pricing 'table', sizes 1..20) or N x linearCents (pricing 'linear', 1..maxLinearPersons,
+// within Stripe's maximum amount), charged as ONE Stripe line (quantity 1). Seats still free = seatsFree minus the
 // seats held by other OPEN Checkout Sessions (metadata.bookings), so two customers cannot both take the last seats.
 // Unlimited masterclasses (seatsFree null) skip the seat and holds checks.
 const crypto = require("crypto");
-const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings, MAX_GROUP } = require("./_shared.js");
+const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings, MAX_GROUP, STRIPE_MAX_CENTS, maxLinearPersons } = require("./_shared.js");
 const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
 
 const DEFAULT_SITE_URL = "https://ceramicsdoronina.it";
@@ -103,9 +104,15 @@ function isMasterclass(p) {
   return !!p && Array.isArray(p.tiersCents);
 }
 
-// Total cents of one cart line: the group tier for a masterclass, price x quantity otherwise.
+// Total cents of a masterclass booking of `persons`: N x linearCents (linear) or the table tier (null = not bookable).
+function groupCents(p, persons) {
+  if (p.pricing === "linear") return persons <= maxLinearPersons(p.linearCents) ? p.linearCents * persons : null;
+  return persons <= MAX_GROUP ? p.tiersCents[persons - 1] : null;
+}
+
+// Total cents of one cart line: the group price for a masterclass, price x quantity otherwise.
 function lineCents(p, quantity) {
-  return isMasterclass(p) ? p.tiersCents[quantity - 1] : p.priceCents * quantity;
+  return isMasterclass(p) ? groupCents(p, quantity) : p.priceCents * quantity;
 }
 
 // Validates one masterclass line (quantity = persons) against the tiers and the seats still free
@@ -118,8 +125,8 @@ function validateGroup(it, catalogue, soldList, holds) {
   const free = unlimited ? Infinity : Math.max(0, seatsFree - (holds[it.id] || 0));
   if (isSold(it.id, catalogue, soldList) || free === 0) throw new ValidationError("sold_out", it.id);
   if (!Number.isInteger(it.quantity) || it.quantity < 1) throw new ValidationError("invalid_quantity", it.id);
-  const tier = it.quantity <= MAX_GROUP ? p.tiersCents[it.quantity - 1] : null;
-  if (!Number.isInteger(tier) || tier <= 0) throw new ValidationError("group_size_unavailable", it.id);
+  const tier = groupCents(p, it.quantity);
+  if (!Number.isInteger(tier) || tier <= 0 || tier > STRIPE_MAX_CENTS) throw new ValidationError("group_size_unavailable", it.id);
   if (it.quantity > free) throw new ValidationError("not_enough_seats", it.id);
 }
 
@@ -185,7 +192,7 @@ function buildLineItems(items, catalogue, siteUrl, locale = "it") {
     if (img) product_data.images = [img];
     if (group) {
       // ONE line for the whole group at the price of its size; quantity is persons, not units
-      return { quantity: 1, price_data: { currency: "eur", unit_amount: p.tiersCents[quantity - 1], product_data } };
+      return { quantity: 1, price_data: { currency: "eur", unit_amount: groupCents(p, quantity), product_data } };
     }
     return {
       quantity,
