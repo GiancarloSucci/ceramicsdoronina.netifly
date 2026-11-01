@@ -22,8 +22,8 @@ test("200: shape, ordered by id, headers, CORS, no extra fields (snapshot source
   assert.equal(r.headers["Cache-Control"], "public, max-age=60");
   assert.equal(r.headers["Access-Control-Allow-Origin"], "*");
   const body = JSON.parse(r.body);
-  assert.deepEqual(Object.keys(body), ["version", "source", "items"]);
-  assert.equal(body.version, 1);
+  assert.deepEqual(Object.keys(body), ["version", "source", "sources", "items", "tabs"]);
+  assert.equal(body.version, 2);
   assert.equal(body.source, "snapshot");
   assert.deepEqual(body.items.map((i) => i.id), ["a", "b"]);
   for (const it of body.items) assert.deepEqual(Object.keys(it).sort(), FIELDS);
