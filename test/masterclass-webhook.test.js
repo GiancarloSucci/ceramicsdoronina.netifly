@@ -84,11 +84,16 @@ test("bookings only (no vase): ids is empty, still one call", async () => {
   assert.ok(!sent[0].includes("ACTION"));
 });
 
-test("seats up to 20 are booked (parseBookings 1..20); 21 or 0 are ignored", async () => {
+test("seats up to 999 are booked (parseBookings 1..999); 1000 or 0 are ignored", async () => {
   const { posts, sent } = await run(session({ item_ids: "mc1", bookings: "mc1:20" }), { reply: ok([entry("mc1", 20, { total: 30 })]) });
   assert.deepEqual(posts[0].body.bookings, [{ id: "mc1", seats: 20 }]);
   assert.ok(sent[0].includes("Masterclass persons: mc1 x 20") && !sent[0].includes("ACTION"));
-  const x = await run(session({ item_ids: "mc1", bookings: "mc1:21,mc3:0,mc3:020" }), { reply: ok([]) });
+  for (const n of [150, 999]) {
+    const r = await run(session({ item_ids: "mc1", bookings: "mc1:" + n }), { reply: ok([entry("mc1", n)]) });
+    assert.deepEqual(r.posts[0].body.bookings, [{ id: "mc1", seats: n }]);
+    assert.ok(r.sent[0].includes("Masterclass persons: mc1 x " + n));
+  }
+  const x = await run(session({ item_ids: "mc1", bookings: "mc1:1000,mc3:0,mc3:020" }), { reply: ok([]) });
   assert.equal(x.posts.length, 0, "nothing valid to book");
 });
 

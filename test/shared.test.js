@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText, parseBookings } = require("../functions/_shared.js");
+const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText, parseBookings, maxLinearPersons, MAX_PERSONS, STRIPE_MAX_CENTS } = require("../functions/_shared.js");
 
 let stripeInstalled = true;
 try { require.resolve("stripe"); } catch (_) { stripeInstalled = false; }
@@ -28,8 +28,18 @@ test("redact / safeText", () => {
   assert.equal(safeText(undefined), "");
 });
 
-test("parseBookings: seats 1..20, malformed entries skipped", () => {
+test("maxLinearPersons: min(999, floor(Stripe max / price))", () => {
+  assert.equal(maxLinearPersons(10000), 999);
+  assert.equal(maxLinearPersons(500000), 199);
+  assert.equal(maxLinearPersons(1000000), 99);
+  assert.equal(maxLinearPersons(100000000), 0);
+  assert.deepEqual([MAX_PERSONS, STRIPE_MAX_CENTS], [999, 99999999]);
+});
+
+test("parseBookings: seats 1..999, malformed entries skipped", () => {
   assert.deepEqual(parseBookings("mc1:1,mc2:20,mc3:9,mc4:10"), [{ id: "mc1", seats: 1 }, { id: "mc2", seats: 20 }, { id: "mc3", seats: 9 }, { id: "mc4", seats: 10 }]);
-  assert.deepEqual(parseBookings("mc1:0,mc1:21,mc1:100,mc1:-1,mc1:1.5,mc1:,MC1:2,bad,mc1:01, mc2:2 "), [{ id: "mc2", seats: 2 }]);
+  assert.deepEqual(parseBookings("mc1:0,mc1:1000,mc1:9999,mc1:-1,mc1:1.5,mc1:,MC1:2,bad,mc1:01, mc2:2 "), [{ id: "mc2", seats: 2 }]);
+  assert.deepEqual(parseBookings("mc1:21,mc1:100,mc2:150,mc3:999"), [{ id: "mc1", seats: 21 }, { id: "mc1", seats: 100 }, { id: "mc2", seats: 150 }, { id: "mc3", seats: 999 }]);
+  assert.deepEqual(parseBookings("mc1:1000,mc1:0999,mc1:1e2"), []);
   assert.deepEqual(parseBookings(undefined), []);
 });

@@ -9,12 +9,12 @@ const { makeHandler } = require("../functions/catalogue.js");
 const { makeHandler: makeWebhook } = require("../functions/stripe-webhook.js");
 const snapshotRaw = require("../functions/catalogue.json");
 // The snapshot as the functions serve it: masterclass items (digital, images/masterclass/) also carry the
-// linear seat fields (tiers 1..min(20,maxQty) x price, null above; nothing booked), derived here independently.
+// linear seat fields (table pricing, tiers 1..min(20,maxQty) x price, null above; nothing booked), derived here independently.
 const snapshot = Object.fromEntries(
   Object.entries(snapshotRaw).map(([id, p]) => {
     if (!(p.type === "digital" && p.image.startsWith("images/masterclass/"))) return [id, p];
     const tiersCents = Array.from({ length: 20 }, (_, i) => (i < p.maxQty ? p.priceCents * (i + 1) : null));
-    return [id, { ...p, tiersCents, seatsTotal: p.maxQty, seatsBooked: 0, seatsFree: p.maxQty }];
+    return [id, { ...p, tiersCents, seatsTotal: p.maxQty, seatsBooked: 0, seatsFree: p.maxQty, pricing: "table" }];
   })
 );
 
@@ -208,7 +208,7 @@ test("endpoint version 2: shape, sorted items, tabs, headers", async () => {
   const BASE = ["id", "image", "maxQty", "name_en", "name_it", "name_ru", "priceCents", "sold", "type"];
   for (const it of body.items) {
     const mc = it.image.startsWith("images/masterclass/");
-    assert.deepEqual(Object.keys(it).sort(), mc ? [...BASE, "seatsBooked", "seatsFree", "seatsTotal", "tiersCents"].sort() : BASE);
+    assert.deepEqual(Object.keys(it).sort(), mc ? [...BASE, "seatsBooked", "seatsFree", "seatsTotal", "tiersCents", "pricing"].sort() : BASE);
   }
   assert.deepEqual(Object.keys(body.tabs), ["vasi", "masterclass", "certificati"]);
   assert.deepEqual(body.tabs.masterclass.headers, HEADERS.masterclass);

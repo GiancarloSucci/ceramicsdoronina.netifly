@@ -124,7 +124,7 @@ test("holds: seats of OPEN sessions are subtracted (only for the requested ids),
   const openSessions = [
     { id: "cs_x", metadata: { item_ids: "m2,m1", bookings: "m2:3,m1:2" } },
     { id: "cs_y", metadata: { item_ids: "v1" } },
-    { id: "cs_z", metadata: { bookings: "garbage,m2:1,m2:21,M2:2" } },
+    { id: "cs_z", metadata: { bookings: "garbage,m2:1,m2:1000,M2:2" } },
   ];
   const { handler, calls, listCalls } = setup({ fake: { openSessions } });
   // m2: 8 - 2 booked - 3 held - 1 held = 2 free
@@ -194,7 +194,7 @@ test("product names: persons suffix per locale, Russian plural forms, Italian pe
 test("product names: Russian plural rule for every group size 1..20 and beyond (11-14 are chelovek)", () => {
   const form = (n) => personsSuffix(n, "ru").replace(/^ \(\d+ | ?\)$/g, "");
   for (let n = 1; n <= 20; n++) assert.equal(form(n), n === 1 ? "человек" : n >= 2 && n <= 4 ? "человека" : "человек", "ru " + n);
-  for (const [n, w] of [[21, "человек"], [22, "человека"], [25, "человек"], [101, "человек"], [111, "человек"], [112, "человек"], [122, "человека"]]) assert.equal(form(n), w, "ru " + n);
+  for (const [n, w] of [[21, "человек"], [22, "человека"], [25, "человек"], [101, "человек"], [111, "человек"], [112, "человек"], [122, "человека"], [999, "человек"]]) assert.equal(form(n), w, "ru " + n);
   assert.equal(personsSuffix(20, "it"), " (20 persone)");
   assert.equal(personsSuffix(20, "en"), " (20 people)");
 });
@@ -206,8 +206,8 @@ const CSV20 = tab(
   { ...base, id: "l2", seats_total: 30, seats_booked: 15, price_1: "100" }
 );
 
-test("unlimited masterclass (seats_total blank, only price_1): N x price_1 up to 20, no holds lookup, never sold out", async () => {
-  for (const n of [1, 7, 20]) {
+test("unlimited masterclass (seats_total blank, only price_1): N x price_1 for any N up to 999, no holds lookup, never sold out", async () => {
+  for (const n of [1, 7, 20, 21, 150, 999]) {
     const { handler, calls, listCalls } = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "u1:20" } }] } });
     assert.equal((await handler(post(mc("u1", n)))).statusCode, 200, "N=" + n);
     assert.equal(calls[0].line_items[0].price_data.unit_amount, 10000 * n);
@@ -215,12 +215,58 @@ test("unlimited masterclass (seats_total blank, only price_1): N x price_1 up to
     assert.equal(listCalls.length, 0, "sessions.list is not called for unlimited items");
   }
   const { handler, calls } = setup({ csv: CSV20 });
-  const [r] = await logsOf(() => handler(post(mc("u1", 21))));
+  const [r] = await logsOf(() => handler(post(mc("u1", 1000))));
   assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "group_size_unavailable", "u1"]);
   assert.equal(calls.length, 0);
 });
 
-test("limited masterclass with 30 seats: free seats and holds still decide, group cap stays 20", async () => {
+test("linear: one line, quantity 1, unit_amount N x price_1, names and metadata for N = 150 and 999", async () => {
+  for (const [n, loc, label] of [[150, "it", "persone"], [999, "ru", "человек"], [111, "en", "people"]]) {
+    const { handler, calls } = setup({ csv: CSV20 });
+    assert.equal((await handler(post({ items: [{ id: "u1", quantity: n }], locale: loc }))).statusCode, 200);
+    const [li] = calls[0].line_items;
+    assert.equal(calls[0].line_items.length, 1);
+    assert.deepEqual([li.quantity, li.price_data.unit_amount], [1, 10000 * n]);
+    assert.ok(li.price_data.product_data.name.endsWith(` (${n} ${label})`), li.price_data.product_data.name);
+    assert.deepEqual(li.price_data.product_data.metadata, { item_id: "u1", seats: String(n) });
+    assert.equal(calls[0].metadata.bookings, `u1:${n}`);
+  }
+  for (const q of [0, -1, 1.5, "5", null]) {
+    const { handler, calls } = setup({ csv: CSV20 });
+    const [r] = await logsOf(() => handler(post(mc("u1", q))));
+    assert.deepEqual([r.statusCode, body(r).error], [400, "invalid_quantity"], String(q));
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("linear: a price_1 of 5000 EUR lowers the ceiling to 199 persons (Stripe maximum amount)", async () => {
+  const csv = tab({ ...base, id: "h1", price_1: "5000" }, { ...base, id: "h2", price_1: "10000" });
+  const a = setup({ csv });
+  assert.equal((await a.handler(post(mc("h1", 199)))).statusCode, 200);
+  assert.equal(a.calls[0].line_items[0].price_data.unit_amount, 99500000);
+  const [r] = await logsOf(() => a.handler(post(mc("h1", 200))));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "group_size_unavailable", "h1"]);
+  const b = setup({ csv });
+  assert.equal((await b.handler(post(mc("h2", 99)))).statusCode, 200);
+  const [r2] = await logsOf(() => b.handler(post(mc("h2", 100))));
+  assert.equal(body(r2).error, "group_size_unavailable");
+});
+
+test("table mode stays capped at 20 and sizes without a price are not bookable, even when unlimited", async () => {
+  const prices = {};
+  for (let n = 1; n <= 20; n++) prices["price_" + n] = String(n * 90);
+  const csv = tab({ ...base, id: "t1", ...prices }, { ...base, id: "t2", price_1: "100", price_3: "250" });
+  const a = setup({ csv });
+  assert.equal((await a.handler(post(mc("t1", 20)))).statusCode, 200);
+  assert.equal(a.calls[0].line_items[0].price_data.unit_amount, 180000);
+  for (const [id, n] of [["t1", 21], ["t1", 150], ["t2", 2], ["t2", 4]]) {
+    const [r] = await logsOf(() => a.handler(post(mc(id, n))));
+    assert.deepEqual([r.statusCode, body(r).error], [400, "group_size_unavailable"], `${id} ${n}`);
+  }
+  assert.equal((await a.handler(post(mc("t2", 3)))).statusCode, 200);
+});
+
+test("limited masterclass with 30 seats: free seats and holds still decide, group cap is the seats (30)", async () => {
   const f = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "l1:10" } }] } });
   assert.equal((await f.handler(post(mc("l1", 15)))).statusCode, 200); // 30 - 5 booked - 10 held = 15 free
   assert.equal(f.listCalls.length, 1);
@@ -233,6 +279,13 @@ test("limited masterclass with 30 seats: free seats and holds still decide, grou
   const [r2] = await logsOf(() => g.handler(post(mc("l2", 16)))); // 15 free
   assert.equal(body(r2).error, "not_enough_seats");
   assert.equal((await g.handler(post(mc("l2", 15)))).statusCode, 200);
+  const full = tab({ ...base, id: "s30", seats_total: 30, price_1: "100" });
+  const h = setup({ csv: full });
+  assert.equal((await h.handler(post(mc("s30", 30)))).statusCode, 200, "30 persons: more than 20");
+  assert.equal(h.calls[0].line_items[0].price_data.unit_amount, 300000);
+  const h2 = setup({ csv: full });
+  const [r31] = await logsOf(() => h2.handler(post(mc("s30", 31))));
+  assert.deepEqual([r31.statusCode, body(r31).error, body(r31).item_id], [400, "not_enough_seats", "s30"]);
 });
 
 test("names reach Stripe in the customer's locale; long titles are cut so the suffix always fits", async () => {

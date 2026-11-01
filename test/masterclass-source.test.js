@@ -140,7 +140,7 @@ test("getCatalogue: items carry the seat fields; rows carry effective seats_book
   const r = await src.getCatalogue({ env, fetchImpl: fetchOf(csv), soldList: [], now });
   assert.deepEqual(r.items.a, {
     type: "digital", name_it: "Corso", name_en: "Corso", name_ru: "Corso", priceCents: 10000, image: "images/masterclass/a.jpg", maxQty: 2, sold: false,
-    tiersCents: [10000, 18000, ...nulls(18)], seatsTotal: 8, seatsBooked: 2, seatsFree: 6,
+    tiersCents: [10000, 18000, ...nulls(18)], seatsTotal: 8, seatsBooked: 2, seatsFree: 6, pricing: "table",
   });
   assert.equal(r.items.b.sold, true);
   assert.equal(r.items.b.seatsFree, 0);
@@ -153,7 +153,7 @@ test("local bookings: effective at once, summed, idempotent per session, expire 
   const now = clock();
   const csv = tab(COLS, row({ id: "a", seats_booked: "1", price_2: "180" }));
   const get = () => src.getCatalogue({ env, fetchImpl: fetchOf(csv), soldList: [], now });
-  src.markBookedLocal([{ id: "a", seats: 2 }, { id: "BAD ID", seats: 1 }, { id: "a", seats: 21 }, { id: "a", seats: 0 }], { now, sessionId: "cs_1" });
+  src.markBookedLocal([{ id: "a", seats: 2 }, { id: "BAD ID", seats: 1 }, { id: "a", seats: 1000 }, { id: "a", seats: 0 }], { now, sessionId: "cs_1" });
   src.markBookedLocal([{ id: "a", seats: 2 }], { now, sessionId: "cs_1" }); // Stripe retry: not counted twice
   let r = await get();
   assert.deepEqual([r.items.a.seatsBooked, r.items.a.seatsFree, r.items.a.maxQty], [3, 5, 2]);
@@ -186,7 +186,7 @@ test("endpoint: masterclass items expose the seat fields, other items do not; ro
   const body = JSON.parse(res.body);
   assert.equal(body.version, 2);
   const mc1 = body.items.find((i) => i.id === "mc1");
-  assert.deepEqual(Object.keys(mc1), ["id", "type", "name_it", "name_en", "name_ru", "priceCents", "image", "maxQty", "sold", "tiersCents", "seatsTotal", "seatsBooked", "seatsFree"]);
+  assert.deepEqual(Object.keys(mc1), ["id", "type", "name_it", "name_en", "name_ru", "priceCents", "image", "maxQty", "sold", "tiersCents", "seatsTotal", "seatsBooked", "seatsFree", "pricing"]);
   assert.deepEqual(mc1.tiersCents, [10000, 18000, ...nulls(18)]);
   assert.equal(body.tabs.masterclass.rows[0].seats_free, "8");
   assert.equal(body.tabs.masterclass.rows[0].price_2, "180");
@@ -194,13 +194,45 @@ test("endpoint: masterclass items expose the seat fields, other items do not; ro
   assert.ok(body.tabs.masterclass.headers.includes("price_8"));
 });
 
-test("rule A: only price_1 filled -> every size 1..20 costs N x price_1", () => {
+test("endpoint: linear items add pricing and linearCents to the allowlist; table items have pricing only", async () => {
+  const csv = tab(COLS, row({ id: "lin", seats_total: "" }), row({ id: "tab", price_2: "180" }), row({ id: "k1" }));
+  const h = makeHandler({ env, fetchImpl: fetchOf(csv), now: clock() });
+  const [res] = await cap(() => h({ httpMethod: "GET", headers: {} }));
+  const items = Object.fromEntries(JSON.parse(res.body).items.map((i) => [i.id, i]));
+  assert.deepEqual(Object.keys(items.lin).slice(-6), ["tiersCents", "seatsTotal", "seatsBooked", "seatsFree", "pricing", "linearCents"]);
+  assert.deepEqual([items.lin.pricing, items.lin.linearCents, items.lin.maxQty, items.lin.seatsFree], ["linear", 10000, 999, null]);
+  assert.deepEqual([items.tab.pricing, "linearCents" in items.tab, items.tab.maxQty], ["table", false, 2]);
+  for (const it of Object.values(items)) assert.ok(!("tracked" in it) && !("maxGroup" in it), "internal fields never leak");
+});
+
+test("rule A: only price_1 filled -> linear pricing, N x price_1 for any N up to 999; tiersCents keeps the first 20", () => {
   const p = parse(row({ id: "a", price_1: "100,50", seats_total: "" }));
   const t = p.items.a.tiersCents;
   assert.equal(t.length, 20);
   for (const n of [1, 7, 20]) assert.equal(t[n - 1], 10050 * n, "N=" + n);
   assert.ok(t.every((c) => c !== null));
-  assert.deepEqual([p.items.a.priceCents, p.items.a.maxQty], [10050, 20]);
+  assert.deepEqual([p.items.a.priceCents, p.items.a.maxQty, p.items.a.pricing, p.items.a.linearCents], [10050, 999, "linear", 10050]);
+});
+
+test("pricing mode: price_2..price_20 all blank = linear, any filled = table (no linearCents)", () => {
+  const p = parse(row({ id: "a", seats_total: "" }), row({ id: "b", seats_total: "", price_20: "900" }), row({ id: "c", seats_total: "", price_2: "150" }));
+  assert.deepEqual([p.items.a.pricing, p.items.a.linearCents], ["linear", 10000]);
+  assert.deepEqual([p.items.b.pricing, "linearCents" in p.items.b, p.items.b.maxQty], ["table", false, 20]);
+  assert.deepEqual([p.items.c.pricing, "linearCents" in p.items.c, p.items.c.maxQty], ["table", false, 2]);
+});
+
+test("linear ceiling: min(999, floor(99999999 / price_1 cents)); a high price_1 lowers it", () => {
+  const p = parse(row({ id: "a", seats_total: "", price_1: "5000" }), row({ id: "b", seats_total: "", price_1: "10000" }), row({ id: "c", seats_total: "", price_1: "1" }));
+  assert.deepEqual([p.items.a.maxQty, p.items.b.maxQty, p.items.c.maxQty], [199, 99, 999]);
+});
+
+test("limited linear item: maxQty = min(ceiling, seatsFree), no longer capped at 20", async () => {
+  const p = parse(row({ id: "a", seats_total: "30" }), row({ id: "b", seats_total: "5000" }), row({ id: "c", seats_total: "30", seats_booked: "10" }));
+  assert.deepEqual([p.items.a.maxQty, p.items.b.maxQty, p.items.c.maxQty], [30, 999, 20]);
+  const csv = tab(COLS, row({ id: "a", seats_total: "30" }));
+  src.markBookedLocal([{ id: "a", seats: 150 }], { now: clock(), sessionId: "cs_1" });
+  const r = await src.getCatalogue({ env, fetchImpl: fetchOf(csv), soldList: [], now: clock() });
+  assert.deepEqual([r.items.a.seatsBooked, r.items.a.seatsFree, r.items.a.maxQty, r.items.a.sold], [150, 0, 0, true], "seats up to 999 are booked locally");
 });
 
 test("explicit tiers disable rule A: blank sizes are not bookable", () => {
@@ -231,7 +263,7 @@ test("seats_total blank or column missing = unlimited; seats_booked still counts
   const r = await src.getCatalogue({ env, fetchImpl: fetchOf(csv), soldList: [], now: clock() });
   assert.deepEqual(
     [r.items.a.seatsTotal, r.items.a.seatsBooked, r.items.a.seatsFree, r.items.a.maxQty, r.items.a.sold],
-    [null, 5, null, 20, false]
+    [null, 5, null, 999, false]
   );
   assert.equal(r.items.a.tiersCents.length, 20);
   const rows = Object.fromEntries(r.tabs.masterclass.rows.map((x) => [x.id, x]));
@@ -239,16 +271,16 @@ test("seats_total blank or column missing = unlimited; seats_booked still counts
   // never overbooked or sold out by seats, however many are booked locally
   src.markBookedLocal([{ id: "a", seats: 20 }, { id: "b", seats: 20 }], { now: clock(), sessionId: "cs_1" });
   const r2 = await src.getCatalogue({ env, fetchImpl: fetchOf(csv), soldList: [], now: clock() });
-  assert.deepEqual([r2.items.a.seatsBooked, r2.items.a.seatsFree, r2.items.a.sold, r2.items.a.maxQty], [25, null, false, 20]);
+  assert.deepEqual([r2.items.a.seatsBooked, r2.items.a.seatsFree, r2.items.a.sold, r2.items.a.maxQty], [25, null, false, 999]);
   const noCol = src.parseTabCsv("masterclass", "id,name_it,img1,price_1\nx,A,a.jpg,50");
   assert.deepEqual([noCol.items.x.seatsTotal, noCol.items.x.seatsFree, noCol.items.x.sold], [null, null, false]);
 });
 
-test("seats_total up to 9999 (not capped at the group size): seatsFree math, maxQty capped at 20", () => {
+test("seats_total up to 9999 (not capped at the group size): seatsFree math, linear maxQty follows the seats", () => {
   const p = parse(row({ id: "a", seats_total: "30", seats_booked: "5" }), row({ id: "b", seats_total: "9999" }), row({ id: "c", seats_total: "30", seats_booked: "15" }), row({ id: "d", seats_total: "30", seats_booked: "30" }));
   const f = (id) => [p.items[id].seatsTotal, p.items[id].seatsFree, p.items[id].maxQty, p.items[id].sold];
-  assert.deepEqual(f("a"), [30, 25, 20, false]);
-  assert.deepEqual(f("b"), [9999, 9999, 20, false]);
+  assert.deepEqual(f("a"), [30, 25, 25, false]);
+  assert.deepEqual(f("b"), [9999, 9999, 999, false]);
   assert.deepEqual(f("c"), [30, 15, 15, false]);
   assert.deepEqual(f("d"), [30, 0, 0, true]);
 });
@@ -263,12 +295,12 @@ test("invalid seats_total (non-integer, 0, negative, above 9999) drops the row w
   assert.ok(logs.some((l) => l.includes("catalogue_rows_dropped") && l.includes('"f"')));
 });
 
-test("v3 template: only price_1, seats_total blank -> unlimited, every size at N x 100 EUR", () => {
+test("v3 template: only price_1, seats_total blank -> unlimited, any size at N x 100 EUR", () => {
   const p = src.parseTabCsv("masterclass", fx("catalogue-tab-Masterclass-v3.csv"));
   assert.deepEqual(p.dropped, []);
   assert.equal(p.rows.length, 6);
   const m = p.items.mc1;
-  assert.deepEqual([m.seatsTotal, m.seatsFree, m.maxQty, m.sold, m.tiersCents[19]], [null, null, 20, false, 200000]);
+  assert.deepEqual([m.seatsTotal, m.seatsFree, m.maxQty, m.sold, m.tiersCents[19]], [null, null, 999, false, 200000]);
   for (const h of ["price_9", "price_20"]) assert.ok(p.headers.includes(h), h);
 });
 
@@ -292,7 +324,7 @@ const nosleep = async () => {};
 test("markSold with bookings sends session_id and bookings and returns the cleaned booked list", async () => {
   const calls = [];
   const body = { ok: true, version: 2, sheet: "Vasi", marked: ["v1"], booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: true, extra: "x" }, { id: "BAD ID" }, null, { id: "mc2", seats: "2", overbooked: "yes" }] };
-  const r = await src.markSold(["v1"], { fetchImpl: reply(body, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 21 }, { id: "x y", seats: 1 }], sessionId: "cs_1" });
+  const r = await src.markSold(["v1"], { fetchImpl: reply(body, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 1000 }, { id: "x y", seats: 1 }], sessionId: "cs_1" });
   assert.deepEqual(calls, [{ secret: "S3CRET-VALUE", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc1", seats: 2 }] }]);
   assert.deepEqual(r, {
     ok: true, marked: ["v1"], version: 2,
