@@ -37,7 +37,9 @@ var MAX_EMAIL = 254;
 var MAX_NAME = 100;
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
-var MAX_SEATS = 8;
+var MAX_SEATS = 20; // largest group the script accepts (the Netlify function currently sells 1..8)
+var DEFAULT_SEATS_TOTAL = 8; // blank seats_total: same default as the Netlify function (keep both in sync)
+var VERSION = 3; // CONTRACT version (what the Netlify function checks), not the Apps Script deployment number
 
 function doPost(e) {
   var body;
@@ -81,7 +83,7 @@ function doPost(e) {
       if (res.error) return out_({ ok: false, error: res.error });
       booked = res.booked;
     }
-    return out_({ ok: true, version: 3, sheet: SHEET_NAME, marked: marked, booked: booked });
+    return out_({ ok: true, version: VERSION, sheet: SHEET_NAME, marked: marked, booked: booked });
   } finally {
     lock.releaseLock();
   }
@@ -143,9 +145,9 @@ function book_(ss, sessionId, bookings, customer) {
       }
     }
     if (row < 0) continue;
-    // seats_total blank (or no such column) means 8, as in the Netlify function; any other non-number: unknown
+    // seats_total blank (or no such column) means DEFAULT_SEATS_TOTAL, as in the Netlify function; any other non-number: unknown
     var cell = totalCol >= 0 ? data[row][totalCol] : '';
-    var total = cell === '' ? MAX_SEATS : typeof cell === 'number' ? cell : null;
+    var total = cell === '' ? DEFAULT_SEATS_TOTAL : typeof cell === 'number' ? cell : null;
     var current = Number(data[row][bookedCol]);
     if (isNaN(current)) current = 0; // blank or text counts as 0
     var prev = done[sessionId + '|' + b.id];
@@ -279,12 +281,12 @@ function createEvent_(disp, rowIdx, b, sessionId, customer) {
   }
 }
 
-// Run once from the editor (Run > authorize) to grant the Google Calendar permission; returns the calendar name.
 // Public health check: opening the /exec URL in a browser shows which code is deployed. No secret, no data, only the version.
 function doGet() {
-  return out_({ ok: true, script: 'ceramicsdoronina-catalogue', version: 3 });
+  return out_({ ok: true, script: 'ceramicsdoronina-catalogue', version: VERSION });
 }
 
+// Run once from the editor (Run > authorize) to grant the Google Calendar permission; returns the calendar name.
 function authorize() {
   return CalendarApp.getDefaultCalendar().getName();
 }

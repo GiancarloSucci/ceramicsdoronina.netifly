@@ -122,7 +122,7 @@ test("safety: secret, JSON, id shape, seats range and integer, array caps", () =
   assert.equal(err({ secret: "S", ids: [5] }), "bad_ids");
   assert.equal(err({ secret: "S", ids: Array(31).fill("v1") }), "bad_ids");
   const bk = (b) => err({ secret: "S", session_id: "cs", ids: [], bookings: [b] });
-  for (const b of [{ id: "mc1", seats: 0 }, { id: "mc1", seats: 9 }, { id: "mc1", seats: 1.5 }, { id: "mc1", seats: "2" }, { id: "MC1", seats: 1 }, { id: "mc1" }, null]) assert.equal(bk(b), "bad_bookings", JSON.stringify(b));
+  for (const b of [{ id: "mc1", seats: 0 }, { id: "mc1", seats: 21 }, { id: "mc1", seats: 1.5 }, { id: "mc1", seats: "2" }, { id: "MC1", seats: 1 }, { id: "mc1" }, null]) assert.equal(bk(b), "bad_bookings", JSON.stringify(b));
   assert.equal(err({ secret: "S", ids: [], bookings: [{ id: "mc1", seats: 1 }] }), "bad_bookings", "session_id required");
   assert.equal(err({ secret: "S", session_id: "cs", ids: [], bookings: Array(31).fill({ id: "mc1", seats: 1 }) }), "bad_bookings");
   assert.equal(s.Masterclass[1][2], "", "nothing written by rejected calls");
