@@ -40,6 +40,11 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
       for (const u of pd.images) assert.ok(isHttps(u) && !/\s/.test(u), `image must be absolute https and encoded: ${u}`);
     }
     assertMetadata(pd.metadata || {}, "product");
+    if (pd.metadata && pd.metadata.seats !== undefined) {
+      // masterclass booking: ONE line for the group, seats as a string 1..8
+      assert.match(pd.metadata.seats, /^[1-8]$/, "seats metadata must be a string 1..8");
+      assert.equal(li.quantity, 1, "masterclass line has quantity 1 (persons live in metadata.seats)");
+    }
     if (catalogue && pd.metadata && catalogue[pd.metadata.item_id]?.type === "physical") physical = true;
   }
   if (catalogue) {
@@ -56,9 +61,14 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
   }
 }
 
-// Fake Stripe client. Records every create() call after validating it.
-function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url: "https://checkout.stripe.com/c/1" } } = {}) {
+// Fake Stripe client. Records every create() call after validating it; a created session becomes an
+// OPEN session (visible to list(), like on Stripe until it is paid or expires) unless opts.trackOpen is false.
+// opts.openSessions: sessions already open, [{id, metadata}]; opts.listErr: list() rejects with it;
+// opts.hasMore: list() reports has_more. list() validates its params like the API (status, limit 1..100).
+function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url: "https://checkout.stripe.com/c/1" }, openSessions = [], listErr, hasMore = false, trackOpen = true } = {}) {
   const calls = [];
+  const listCalls = [];
+  const open = openSessions.map((s) => ({ status: "open", ...s }));
   const client = {
     checkout: {
       sessions: {
@@ -66,12 +76,20 @@ function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url:
           assertStripeRules(p, { now: typeof now === "function" ? now() : now, catalogue });
           calls.push(p);
           if (throwErr) throw throwErr;
+          if (trackOpen) open.push({ id: session.id, status: "open", metadata: p.metadata });
           return session;
+        },
+        list: async (p) => {
+          listCalls.push(p);
+          assert.ok(p && p.limit >= 1 && p.limit <= 100, "list limit 1..100");
+          assert.ok(!p.status || ["open", "complete", "expired"].includes(p.status), "list status");
+          if (listErr) throw listErr;
+          return { object: "list", data: open.filter((s) => !p.status || s.status === p.status), has_more: hasMore };
         },
       },
     },
   };
-  return { client, calls };
+  return { client, calls, listCalls, open };
 }
 
 module.exports = { assertStripeRules, makeStripeFake };

@@ -3,8 +3,11 @@
 // Prices, names, images and item type come ONLY from the server-side catalogue
 // (the published Google Sheet via functions/_catalogue-source.js, falling back to the
 // snapshot functions/catalogue.json). The client payload is never trusted for money. See README.md for the full contract.
+// Masterclass items (catalogue item with tiersCents): `quantity` means PERSONS (1..8) and the price is the
+// tier of that group size, charged as ONE Stripe line (quantity 1). Seats still free = seatsFree minus the
+// seats held by other OPEN Checkout Sessions (metadata.bookings), so two customers cannot both take the last seats.
 const crypto = require("crypto");
-const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText } = require("./_shared.js");
+const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings } = require("./_shared.js");
 const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
 
 const DEFAULT_SITE_URL = "https://ceramicsdoronina.it";
@@ -13,6 +16,8 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
 const CHECKOUT_TTL_SECONDS = 30 * 60; // Stripe minimum for expires_at
 const EXPIRY_SAFETY_SECONDS = 60;
 const METADATA_VALUE_MAX = 500; // Stripe limit per metadata value
+const MAX_GROUP = 8; // masterclass booking size: 1..8 persons
+const HOLDS_LIST_LIMIT = 100; // open sessions inspected for seat holds
 
 // Shipping tiers on the PHYSICAL subtotal only (EUR cents).
 const SHIPPING = {
@@ -93,19 +98,52 @@ function isSold(id, catalogue, soldList) {
   return !!(catalogue[id] && catalogue[id].sold) || (Array.isArray(soldList) && soldList.includes(id));
 }
 
+// Masterclass items carry the price of each group size (tiersCents[N-1], null = not bookable).
+function isMasterclass(p) {
+  return !!p && Array.isArray(p.tiersCents);
+}
+
+// Total cents of one cart line: the group tier for a masterclass, price x quantity otherwise.
+function lineCents(p, quantity) {
+  return isMasterclass(p) ? p.tiersCents[quantity - 1] : p.priceCents * quantity;
+}
+
+// Validates one masterclass line (quantity = persons) against the tiers and the seats still free
+// (`holds`: seats held by open sessions, per id). Distinct codes: sold_out, invalid_quantity,
+// group_size_unavailable, not_enough_seats.
+function validateGroup(it, catalogue, soldList, holds) {
+  const p = catalogue[it.id];
+  const seatsFree = Number.isInteger(p.seatsFree) ? p.seatsFree : 0;
+  const free = Math.max(0, seatsFree - (holds[it.id] || 0));
+  if (isSold(it.id, catalogue, soldList) || free === 0) throw new ValidationError("sold_out", it.id);
+  if (!Number.isInteger(it.quantity) || it.quantity < 1) throw new ValidationError("invalid_quantity", it.id);
+  const tier = it.quantity <= MAX_GROUP ? p.tiersCents[it.quantity - 1] : null;
+  if (!Number.isInteger(tier) || tier <= 0) throw new ValidationError("group_size_unavailable", it.id);
+  if (it.quantity > free) throw new ValidationError("not_enough_seats", it.id);
+}
+
 // Validates the (already JSON-parsed) body. Returns {items:[{id,quantity}], locale}
 // with duplicate ids merged (locale is null when missing/invalid: Stripe auto and
-// Italian copy are used); throws ValidationError on any client fault. Errors about
-// a specific line carry itemId.
-function validateBody(body, catalogue = {}, soldList = []) {
+// Italian copy are used; a masterclass id may appear only once: duplicate_item); throws
+// ValidationError on any client fault. Errors about a specific line carry itemId.
+// `holds`: {masterclassId: seats held by open Checkout Sessions}.
+function validateBody(body, catalogue = {}, soldList = [], holds = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("invalid_body");
   const { items } = body;
   if (!Array.isArray(items) || items.length < 1 || items.length > MAX_ITEMS) throw new ValidationError("invalid_items");
   const merged = new Map();
+  const groups = new Set();
   for (const it of items) {
     if (!it || typeof it !== "object" || Array.isArray(it)) throw new ValidationError("invalid_item");
     if (typeof it.id !== "string" || !ID_PATTERN.test(it.id)) throw new ValidationError("invalid_id");
     if (!Object.prototype.hasOwnProperty.call(catalogue, it.id)) throw new ValidationError("unknown_item", it.id);
+    if (isMasterclass(catalogue[it.id])) {
+      if (groups.has(it.id)) throw new ValidationError("duplicate_item", it.id);
+      groups.add(it.id);
+      validateGroup(it, catalogue, soldList, holds);
+      merged.set(it.id, it.quantity);
+      continue;
+    }
     if (isSold(it.id, catalogue, soldList)) throw new ValidationError("item_sold", it.id);
     if (!Number.isInteger(it.quantity) || it.quantity < 1) throw new ValidationError("invalid_quantity", it.id);
     merged.set(it.id, (merged.get(it.id) || 0) + it.quantity);
@@ -113,14 +151,21 @@ function validateBody(body, catalogue = {}, soldList = []) {
   const out = [];
   for (const [id, quantity] of merged) {
     const max = Number.isInteger(catalogue[id].maxQty) ? catalogue[id].maxQty : 1;
-    if (quantity > max) throw new ValidationError("quantity_too_high", id);
+    if (!groups.has(id) && quantity > max) throw new ValidationError("quantity_too_high", id);
     out.push({ id, quantity });
   }
   return { items: out, locale: LOCALES.includes(body.locale) ? body.locale : null };
 }
 
-function productName(p, locale) {
-  return String(p["name_" + locale] || p.name_it || p.name || "Item").slice(0, 120);
+function productName(p, locale, suffix = "") {
+  return String(p["name_" + locale] || p.name_it || p.name || "Item").slice(0, 120 - suffix.length) + suffix;
+}
+
+// " (2 persone)" / " (1 person)" / " (5 человек)" for the Stripe product name of a masterclass booking.
+function personsSuffix(n, locale) {
+  if (locale === "en") return ` (${n} ${n === 1 ? "person" : "people"})`;
+  if (locale === "ru") return ` (${n} ${n % 10 === 1 && n % 100 !== 11 ? "человек" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? "человека" : "человек"})`;
+  return ` (${n} ${n === 1 ? "persona" : "persone"})`;
 }
 
 function imageUrl(p, siteUrl) {
@@ -133,8 +178,14 @@ function buildLineItems(items, catalogue, siteUrl, locale = "it") {
   return items.map(({ id, quantity }) => {
     const p = catalogue[id];
     const img = imageUrl(p, siteUrl);
-    const product_data = { name: productName(p, locale), metadata: { item_id: id } };
+    const group = isMasterclass(p);
+    const product_data = { name: productName(p, locale, group ? personsSuffix(quantity, locale) : ""), metadata: { item_id: id } };
+    if (group) product_data.metadata.seats = String(quantity);
     if (img) product_data.images = [img];
+    if (group) {
+      // ONE line for the whole group at the price of its size; quantity is persons, not units
+      return { quantity: 1, price_data: { currency: "eur", unit_amount: p.tiersCents[quantity - 1], product_data } };
+    }
     return {
       quantity,
       price_data: { currency: "eur", unit_amount: p.priceCents, product_data },
@@ -173,7 +224,7 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now 
   const line_items = buildLineItems(items, catalogue, siteUrl, loc || "it");
   const physicalCents = physicalSubtotal(items, catalogue);
   const hasPhysical = items.some(({ id }) => catalogue[id].type === "physical");
-  const subtotalCents = items.reduce((s, { id, quantity }) => s + catalogue[id].priceCents * quantity, 0);
+  const subtotalCents = items.reduce((s, { id, quantity }) => s + lineCents(catalogue[id], quantity), 0);
   const shippingCents = hasPhysical ? computeShippingCents(physicalCents) : 0;
 
   // Metadata values are limited to 500 chars: keep only WHOLE ids that fit.
@@ -186,6 +237,18 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now 
     len += add;
   }
   const itemIdsTruncated = kept.length < items.length;
+  // metadata.bookings "mc1:2,mc3:1" (masterclass id : persons), read back by the webhook and by the seat holds
+  const bookings = [];
+  let bookingsLen = 0;
+  for (const { id, quantity } of items) {
+    if (!isMasterclass(catalogue[id])) continue;
+    const entry = `${id}:${quantity}`;
+    const add = (bookings.length ? 1 : 0) + entry.length;
+    if (bookingsLen + add > METADATA_VALUE_MAX) break;
+    bookings.push(entry);
+    bookingsLen += add;
+  }
+  const bookingsTruncated = bookings.length < items.filter(({ id }) => isMasterclass(catalogue[id])).length;
 
   const params = {
     mode: "payment",
@@ -206,6 +269,7 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now 
     expires_at: Math.floor(now() / 1000) + CHECKOUT_TTL_SECONDS + EXPIRY_SAFETY_SECONDS,
     metadata: { item_ids: kept.join(",") },
   };
+  if (bookings.length) params.metadata.bookings = bookings.join(",");
   if (loc) params.locale = loc;
   if (hasPhysical) {
     params.shipping_address_collection = { allowed_countries: ALLOWED_COUNTRIES };
@@ -225,9 +289,21 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now 
     params,
     itemIds: items.map((i) => i.id).join(","),
     itemIdsTruncated,
+    bookingsTruncated,
     subtotalCents,
     shippingCents,
   };
+}
+
+// Seats held by OPEN Checkout Sessions (not yet paid, not expired: at most 30 minutes) for the given
+// masterclass ids. Returns {holds: {id: seats}, hasMore}. Throws when Stripe cannot be asked.
+async function fetchHolds(stripe, ids) {
+  const list = await stripe.checkout.sessions.list({ status: "open", limit: HOLDS_LIST_LIMIT });
+  const holds = {};
+  for (const s of (list && list.data) || []) {
+    for (const b of parseBookings(s && s.metadata && s.metadata.bookings)) if (ids.has(b.id)) holds[b.id] = (holds[b.id] || 0) + b.seats;
+  }
+  return { holds, hasMore: !!(list && list.has_more) };
 }
 
 function logUnexpected(requestId, err) {
@@ -301,7 +377,24 @@ function makeHandler({
       } else {
         ({ items: cat } = await getCatalogue({ fetchImpl, now, env, soldList }));
       }
-      ({ items, locale } = validateBody(body, cat, catalogue ? soldList || require("./sold.json") : []));
+      // Seat holds are looked up only when the cart has a masterclass. Fail open: if Stripe cannot be
+      // asked, the sheet's seatsFree alone decides (a double booking is then caught by the webhook as OVERBOOKED).
+      let holds = {};
+      const groupIds = new Set(
+        (Array.isArray(body && body.items) ? body.items : [])
+          .map((it) => it && it.id)
+          .filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(cat, id) && isMasterclass(cat[id]))
+      );
+      if (groupIds.size) {
+        try {
+          const r = await fetchHolds(stripeFactory(secretKey), groupIds);
+          holds = r.holds;
+          if (r.hasMore) logLine("warn", { event: "holds_list_truncated", request_id: requestId, limit: HOLDS_LIST_LIMIT });
+        } catch (err) {
+          logLine("warn", { event: "holds_unavailable", request_id: requestId, type: err && err.type, code: err && err.code, message: safeText(err && err.message, 200) });
+        }
+      }
+      ({ items, locale } = validateBody(body, cat, catalogue ? soldList || require("./sold.json") : [], holds));
     } catch (err) {
       if (err instanceof ValidationError) {
         const log = { event: "validation_failed", request_id: requestId, code: err.code };
@@ -318,11 +411,15 @@ function makeHandler({
     }
 
     try {
-      const { params, itemIds, itemIdsTruncated, subtotalCents, shippingCents } = buildSessionParams({
+      const { params, itemIds, itemIdsTruncated, bookingsTruncated, subtotalCents, shippingCents } = buildSessionParams({
         items, locale, catalogue: cat, siteUrl, now,
       });
       if (itemIdsTruncated) {
         logLine("warn", { event: "metadata_item_ids_truncated", request_id: requestId, kept: params.metadata.item_ids });
+      }
+
+      if (bookingsTruncated) {
+        logLine("warn", { event: "metadata_bookings_truncated", request_id: requestId, kept: params.metadata.bookings });
       }
 
       let session;
@@ -364,6 +461,7 @@ exports.makeHandler = makeHandler;
 exports.isOriginAllowed = isOriginAllowed;
 exports.parseAllowedOrigins = parseAllowedOrigins;
 exports.validateBody = validateBody;
+exports.personsSuffix = personsSuffix;
 exports.buildLineItems = buildLineItems;
 exports.buildSessionParams = buildSessionParams;
 exports.normalizeSiteUrl = normalizeSiteUrl;
