@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText } = require("../functions/_shared.js");
+const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText, parseBookings } = require("../functions/_shared.js");
 
 let stripeInstalled = true;
 try { require.resolve("stripe"); } catch (_) { stripeInstalled = false; }
@@ -26,4 +26,10 @@ test("redact / safeText", () => {
   assert.equal(redact("a sk_live_AbC1 b rk_test_x whsec_Z9 pk_live_q"), "a [redacted] b [redacted] [redacted] [redacted]");
   assert.equal(safeText("x".repeat(300), 200).length, 200);
   assert.equal(safeText(undefined), "");
+});
+
+test("parseBookings: seats 1..20, malformed entries skipped", () => {
+  assert.deepEqual(parseBookings("mc1:1,mc2:20,mc3:9,mc4:10"), [{ id: "mc1", seats: 1 }, { id: "mc2", seats: 20 }, { id: "mc3", seats: 9 }, { id: "mc4", seats: 10 }]);
+  assert.deepEqual(parseBookings("mc1:0,mc1:21,mc1:100,mc1:-1,mc1:1.5,mc1:,MC1:2,bad,mc1:01, mc2:2 "), [{ id: "mc2", seats: 2 }]);
+  assert.deepEqual(parseBookings(undefined), []);
 });

@@ -41,8 +41,8 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
     }
     assertMetadata(pd.metadata || {}, "product");
     if (pd.metadata && pd.metadata.seats !== undefined) {
-      // masterclass booking: ONE line for the group, seats as a string 1..8
-      assert.match(pd.metadata.seats, /^[1-8]$/, "seats metadata must be a string 1..8");
+      // masterclass booking: ONE line for the group, seats as a string 1..20
+      assert.match(pd.metadata.seats, /^([1-9]|1\d|20)$/, "seats metadata must be a string 1..20");
       assert.equal(li.quantity, 1, "masterclass line has quantity 1 (persons live in metadata.seats)");
     }
     if (catalogue && pd.metadata && catalogue[pd.metadata.item_id]?.type === "physical") physical = true;

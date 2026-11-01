@@ -27,14 +27,16 @@ function safeText(s, max = 200) {
 }
 
 // Parses the session metadata `bookings` ("mc1:2,mc3:1": masterclass id : persons) into
-// [{id, seats}]. Malformed entries are skipped; seats are 1..8.
+// [{id, seats}]. Malformed entries are skipped; seats are 1..MAX_GROUP (20).
+const MAX_GROUP = 20; // masterclass booking size: 1..20 persons
+
 function parseBookings(raw) {
   const out = [];
   for (const part of String(raw == null ? "" : raw).split(",")) {
-    const m = /^([a-z][a-z0-9-]{0,31}):([1-8])$/.exec(part.trim());
-    if (m) out.push({ id: m[1], seats: Number(m[2]) });
+    const m = /^([a-z][a-z0-9-]{0,31}):([1-9]\d?)$/.exec(part.trim());
+    if (m && Number(m[2]) <= MAX_GROUP) out.push({ id: m[1], seats: Number(m[2]) });
   }
   return out;
 }
 
-module.exports = { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText, parseBookings };
+module.exports = { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, redact, safeText, parseBookings, MAX_GROUP };

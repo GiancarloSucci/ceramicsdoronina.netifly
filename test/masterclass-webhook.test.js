@@ -84,6 +84,21 @@ test("bookings only (no vase): ids is empty, still one call", async () => {
   assert.ok(!sent[0].includes("ACTION"));
 });
 
+test("seats up to 20 are booked (parseBookings 1..20); 21 or 0 are ignored", async () => {
+  const { posts, sent } = await run(session({ item_ids: "mc1", bookings: "mc1:20" }), { reply: ok([entry("mc1", 20, { total: 30 })]) });
+  assert.deepEqual(posts[0].body.bookings, [{ id: "mc1", seats: 20 }]);
+  assert.ok(sent[0].includes("Masterclass persons: mc1 x 20") && !sent[0].includes("ACTION"));
+  const x = await run(session({ item_ids: "mc1", bookings: "mc1:21,mc3:0,mc3:020" }), { reply: ok([]) });
+  assert.equal(x.posts.length, 0, "nothing valid to book");
+});
+
+test("unlimited masterclass: reply total null, overbooked false -> no OVERBOOKED line", async () => {
+  const { res, sent, cap } = await run(session({ item_ids: "mc3", bookings: "mc3:20" }), { reply: ok([entry("mc3", 20, { booked_after: 40, total: null, overbooked: false })]) });
+  assert.equal(res.statusCode, 200);
+  assert.ok(!sent[0].includes("OVERBOOKED") && !sent[0].includes("ACTION"));
+  assert.equal(events(cap, "seats_overbooked").length, 0);
+});
+
 test("a vase-only order keeps the first-version payload {secret, ids}", async () => {
   const { posts } = await run(session({ item_ids: "v3" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
   assert.deepEqual(posts[0].body, { secret: SECRET, ids: ["v3"] });

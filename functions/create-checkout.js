@@ -3,11 +3,12 @@
 // Prices, names, images and item type come ONLY from the server-side catalogue
 // (the published Google Sheet via functions/_catalogue-source.js, falling back to the
 // snapshot functions/catalogue.json). The client payload is never trusted for money. See README.md for the full contract.
-// Masterclass items (catalogue item with tiersCents): `quantity` means PERSONS (1..8) and the price is the
+// Masterclass items (catalogue item with tiersCents): `quantity` means PERSONS (1..20) and the price is the
 // tier of that group size, charged as ONE Stripe line (quantity 1). Seats still free = seatsFree minus the
 // seats held by other OPEN Checkout Sessions (metadata.bookings), so two customers cannot both take the last seats.
+// Unlimited masterclasses (seatsFree null) skip the seat and holds checks.
 const crypto = require("crypto");
-const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings } = require("./_shared.js");
+const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings, MAX_GROUP } = require("./_shared.js");
 const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
 
 const DEFAULT_SITE_URL = "https://ceramicsdoronina.it";
@@ -16,7 +17,6 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
 const CHECKOUT_TTL_SECONDS = 30 * 60; // Stripe minimum for expires_at
 const EXPIRY_SAFETY_SECONDS = 60;
 const METADATA_VALUE_MAX = 500; // Stripe limit per metadata value
-const MAX_GROUP = 8; // masterclass booking size: 1..8 persons
 const HOLDS_LIST_LIMIT = 100; // open sessions inspected for seat holds
 
 // Shipping tiers on the PHYSICAL subtotal only (EUR cents).
@@ -113,8 +113,9 @@ function lineCents(p, quantity) {
 // group_size_unavailable, not_enough_seats.
 function validateGroup(it, catalogue, soldList, holds) {
   const p = catalogue[it.id];
+  const unlimited = p.seatsFree === null; // seats_total blank: no seat check
   const seatsFree = Number.isInteger(p.seatsFree) ? p.seatsFree : 0;
-  const free = Math.max(0, seatsFree - (holds[it.id] || 0));
+  const free = unlimited ? Infinity : Math.max(0, seatsFree - (holds[it.id] || 0));
   if (isSold(it.id, catalogue, soldList) || free === 0) throw new ValidationError("sold_out", it.id);
   if (!Number.isInteger(it.quantity) || it.quantity < 1) throw new ValidationError("invalid_quantity", it.id);
   const tier = it.quantity <= MAX_GROUP ? p.tiersCents[it.quantity - 1] : null;
@@ -383,7 +384,7 @@ function makeHandler({
       const groupIds = new Set(
         (Array.isArray(body && body.items) ? body.items : [])
           .map((it) => it && it.id)
-          .filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(cat, id) && isMasterclass(cat[id]))
+          .filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(cat, id) && isMasterclass(cat[id]) && cat[id].seatsFree !== null) // unlimited: no holds lookup
       );
       if (groupIds.size) {
         try {

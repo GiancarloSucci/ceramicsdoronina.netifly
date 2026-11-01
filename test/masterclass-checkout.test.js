@@ -9,7 +9,7 @@ const { makeStripeFake } = require("./helpers/stripe-fake.js");
 const ORIGIN = "https://ceramicsdoronina.it";
 const NOW = 1_000_000_000_000;
 const MCURL = "https://docs.google.com/spreadsheets/d/e/TOKMC/pub?gid=2&output=csv";
-const COLS = ["id", "name_it", "name_en", "name_ru", "seats_total", "seats_booked", "price_1", "price_2", "price_3", "price_4", "price_5", "price_6", "price_7", "price_8", "img1"];
+const COLS = ["id", "name_it", "name_en", "name_ru", "seats_total", "seats_booked", ...Array.from({ length: 20 }, (_, i) => "price_" + (i + 1)), "img1"];
 const tab = (...rows) => [COLS.join(","), ...rows.map((r) => COLS.map((c) => JSON.stringify(r[c] == null ? "" : String(r[c]))).join(","))].join("\n");
 const base = { name_it: "Corso", name_en: "Course", name_ru: "Курс", img1: "w.jpg" };
 const CSV = tab(
@@ -65,12 +65,13 @@ test("price is the tier of the group size, not linear: 1, 2 and 8 persons", asyn
   }
 });
 
-test("group sizes without a tier, outside 1..8 or malformed are rejected with distinct codes and item_id", async () => {
+test("group sizes without a tier, outside 1..20 or malformed are rejected with distinct codes and item_id", async () => {
   const { handler, calls } = setup();
   const cases = [
     [{ id: "m1", quantity: 3 }, "group_size_unavailable"],
     [{ id: "m1", quantity: 5 }, "group_size_unavailable"],
     [{ id: "m1", quantity: 9 }, "group_size_unavailable"],
+    [{ id: "m1", quantity: 21 }, "group_size_unavailable"],
     [{ id: "m1", quantity: 100 }, "group_size_unavailable"],
     [{ id: "m4", quantity: 1 }, "group_size_unavailable"],
     [{ id: "m1", quantity: 0 }, "invalid_quantity"],
@@ -123,7 +124,7 @@ test("holds: seats of OPEN sessions are subtracted (only for the requested ids),
   const openSessions = [
     { id: "cs_x", metadata: { item_ids: "m2,m1", bookings: "m2:3,m1:2" } },
     { id: "cs_y", metadata: { item_ids: "v1" } },
-    { id: "cs_z", metadata: { bookings: "garbage,m2:1,m2:9,M2:2" } },
+    { id: "cs_z", metadata: { bookings: "garbage,m2:1,m2:21,M2:2" } },
   ];
   const { handler, calls, listCalls } = setup({ fake: { openSessions } });
   // m2: 8 - 2 booked - 3 held - 1 held = 2 free
@@ -188,6 +189,50 @@ test("product names: persons suffix per locale, Russian plural forms, Italian pe
     ru: ["1 человек", "2 человека", "3 человека", "4 человека", "5 человек", "6 человек", "7 человек", "8 человек"],
   };
   for (const loc of Object.keys(exp)) for (let n = 1; n <= 8; n++) assert.equal(personsSuffix(n, loc), ` (${exp[loc][n - 1]})`, `${loc} ${n}`);
+});
+
+test("product names: Russian plural rule for every group size 1..20 and beyond (11-14 are chelovek)", () => {
+  const form = (n) => personsSuffix(n, "ru").replace(/^ \(\d+ | ?\)$/g, "");
+  for (let n = 1; n <= 20; n++) assert.equal(form(n), n === 1 ? "человек" : n >= 2 && n <= 4 ? "человека" : "человек", "ru " + n);
+  for (const [n, w] of [[21, "человек"], [22, "человека"], [25, "человек"], [101, "человек"], [111, "человек"], [112, "человек"], [122, "человека"]]) assert.equal(form(n), w, "ru " + n);
+  assert.equal(personsSuffix(20, "it"), " (20 persone)");
+  assert.equal(personsSuffix(20, "en"), " (20 people)");
+});
+
+// price_1 only (rule A): u1 unlimited (seats_total blank), l1 and l2 limited to 30 seats (5 and 15 booked)
+const CSV20 = tab(
+  { ...base, id: "u1", seats_booked: 7, price_1: "100" },
+  { ...base, id: "l1", seats_total: 30, seats_booked: 5, price_1: "100" },
+  { ...base, id: "l2", seats_total: 30, seats_booked: 15, price_1: "100" }
+);
+
+test("unlimited masterclass (seats_total blank, only price_1): N x price_1 up to 20, no holds lookup, never sold out", async () => {
+  for (const n of [1, 7, 20]) {
+    const { handler, calls, listCalls } = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "u1:20" } }] } });
+    assert.equal((await handler(post(mc("u1", n)))).statusCode, 200, "N=" + n);
+    assert.equal(calls[0].line_items[0].price_data.unit_amount, 10000 * n);
+    assert.equal(calls[0].metadata.bookings, `u1:${n}`);
+    assert.equal(listCalls.length, 0, "sessions.list is not called for unlimited items");
+  }
+  const { handler, calls } = setup({ csv: CSV20 });
+  const [r] = await logsOf(() => handler(post(mc("u1", 21))));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "group_size_unavailable", "u1"]);
+  assert.equal(calls.length, 0);
+});
+
+test("limited masterclass with 30 seats: free seats and holds still decide, group cap stays 20", async () => {
+  const f = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "l1:10" } }] } });
+  assert.equal((await f.handler(post(mc("l1", 15)))).statusCode, 200); // 30 - 5 booked - 10 held = 15 free
+  assert.equal(f.listCalls.length, 1);
+  const f2 = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "l1:10" } }] } });
+  const [r] = await logsOf(() => f2.handler(post(mc("l1", 16))));
+  assert.equal(body(r).error, "not_enough_seats");
+  const g = setup({ csv: CSV20 });
+  assert.equal((await g.handler(post(mc("l1", 20)))).statusCode, 200);
+  assert.equal(g.calls[0].line_items[0].price_data.unit_amount, 200000);
+  const [r2] = await logsOf(() => g.handler(post(mc("l2", 16)))); // 15 free
+  assert.equal(body(r2).error, "not_enough_seats");
+  assert.equal((await g.handler(post(mc("l2", 15)))).statusCode, 200);
 });
 
 test("names reach Stripe in the customer's locale; long titles are cut so the suffix always fits", async () => {
