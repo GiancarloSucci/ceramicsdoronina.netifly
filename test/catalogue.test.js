@@ -103,7 +103,7 @@ sys.exit(3)
 `);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /FATAL missing image files[\s\S]*x: images\/none\.jpg/);
-  assert.ok(!/y:/.test(r.stdout));
+  assert.ok(!/(^|\n)\s*y: /.test(r.stdout), "id y has no image path to complain about"); // anchored: a temp-dir path may contain 'y:'
 });
 
 test("python: image dirs per source", { skip: PY_SKIP }, () => {
