@@ -1,15 +1,21 @@
 // functions/_catalogue-source.js
-// Live catalogue source: a Google Sheet published as CSV (CATALOGUE_CSV_URL), read
-// server-side with an in-memory cache and fallbacks, plus the write-back of the
-// "sold" marker through a Google Apps Script web app (CATALOGUE_WRITE_URL).
+// Live catalogue source: ONE Google Sheet with three tabs (Vasi, Masterclass, Certificati),
+// each published as CSV (CATALOGUE_VASI_CSV_URL / CATALOGUE_MASTERCLASS_CSV_URL /
+// CATALOGUE_CERTIFICATI_CSV_URL), read server-side with an in-memory cache and fallbacks, plus
+// the write-back of the "sold" marker through a Google Apps Script web app (CATALOGUE_WRITE_URL).
+// The tabs have the same headers as the old ODS files and are the single source of truth for
+// commerce data (type, price, maxQty, image, sold: derived like tools/build-catalogue.py) AND
+// display data (whitelisted columns, exposed by functions/catalogue.js).
 // The leading underscore keeps Netlify from treating this file as a function.
 //
-// getCatalogue() never throws: sheet (fresh, <= 60 s) -> sheet (stale, <= 24 h)
-// -> bundled snapshot (functions/catalogue.json). functions/sold.json and the ids
-// marked locally after a payment are merged on top in every case.
-// Env: CATALOGUE_CSV_URL (https, docs.google.com only), CATALOGUE_WRITE_URL (https,
-// script.google.com only), CATALOGUE_WRITE_SECRET. Secrets and full URLs are never
-// logged, only the host.
+// getCatalogue() never throws. Per tab: sheet (fresh, <= 60 s) -> sheet (stale, <= 24 h) ->
+// bundled snapshot items of that type (functions/catalogue.json). functions/sold.json and the
+// ids marked locally after a payment are merged on top in every case.
+// Mode: any of the three tab variables set -> tabs; else CATALOGUE_CSV_URL (DEPRECATED single
+// 9-column sheet) -> legacy; else snapshot.
+// Env: the variables above (https, docs.google.com only), CATALOGUE_WRITE_URL (https,
+// script.google.com only), CATALOGUE_WRITE_SECRET. Secrets and full URLs are never logged,
+// only the host.
 
 const CSV_HOST = "docs.google.com";
 const WRITE_HOST = "script.google.com";
@@ -28,8 +34,37 @@ const MAX_QTY = 100;
 const COLUMNS = ["id", "type", "name_it", "name_en", "name_ru", "price", "image", "maxQty", "sold"];
 const SOLD_WORDS = ["true", "1", "yes", "si", "x"];
 const MAX_LOGGED_IDS = 20;
+const SHEET_NAME = "Vasi"; // the tab the Apps Script marks; its reply must name it
+const IMAGE_RE = /^[^.\u0000-\u001f][^\\/:?#\u0000-\u001f]*\.(?:jpe?g|png|webp|svg)$/i;
 
-const state = { cache: null, failedAt: 0, inflight: null, local: new Map(), warned: new Set() };
+// Whitelisted headers per tab (display data). Anything else in the sheet (notes, and
+// shopify_variant_id) is never read or exposed. `required` columns missing -> the tab fails.
+const TABS = {
+  vasi: {
+    env: "CATALOGUE_VASI_CSV_URL",
+    dir: "images/catalogue/",
+    headers: "id,name_ru,name_it,name_en,short_ru,short_it,short_en,long_ru,long_it,long_en,height,diameter,material,material-en,material-ru,technique,technique-en,technique-ru,finish,finish-en,finish-ru,img1,img2,img3,img4,img5,img6,venduto,price_old,price_new".split(","),
+    required: ["id", "name_it", "name_en", "name_ru", "img1", "venduto", "price_new"],
+  },
+  masterclass: {
+    env: "CATALOGUE_MASTERCLASS_CSV_URL",
+    dir: "images/masterclass/",
+    headers: "id,name_it,name_en,name_ru,short_it,short_en,short_ru,long_it,long_en,long_ru,date,time,level,spots,price,img1".split(","),
+    required: ["id", "name_it", "name_en", "name_ru", "img1", "spots", "price"],
+  },
+  certificati: {
+    env: "CATALOGUE_CERTIFICATI_CSV_URL",
+    dir: "images/certificati/",
+    headers: "id,name_it,name_en,name_ru,short_it,short_en,short_ru,long_it,long_en,long_ru,img1,amount_eur".split(","),
+    required: ["id", "name_it", "name_en", "name_ru", "img1", "amount_eur"],
+  },
+};
+const TAB_KEYS = Object.keys(TABS);
+const RANK = { sheet: 0, stale: 1, snapshot: 2 };
+
+// One fetch slot (cache, back-off, shared in-flight request) per sheet: "legacy" or a tab key.
+const state = { slots: {}, local: new Map(), warned: new Set() };
+const slotOf = (name) => state.slots[name] || (state.slots[name] = { cache: null, failedAt: 0, inflight: null });
 
 function logLine(level, obj) {
   console[level](JSON.stringify(obj));
@@ -41,11 +76,9 @@ function warnOnce(key, obj) {
   logLine("warn", obj);
 }
 
-// Test helper: forget cache, failure back-off, local sold ids and one-time warnings.
+// Test helper: forget caches, failure back-off, local sold ids and one-time warnings.
 function _reset() {
-  state.cache = null;
-  state.failedAt = 0;
-  state.inflight = null;
+  state.slots = {};
   state.local.clear();
   state.warned.clear();
 }
@@ -163,6 +196,36 @@ function validateRow(r) {
   return { id, item: { type, ...names, priceCents, image, maxQty, sold: parseSold(r.sold) } };
 }
 
+// Validates one row of a tab (object keyed by whitelisted headers); derivation mirrors
+// tools/build-catalogue.py. Returns {id, item} or {id, error}.
+function validateTabRow(key, r) {
+  const tab = TABS[key];
+  const id = String(r.id || "").trim();
+  if (!ID_RE.test(id)) return { id, error: "id" };
+  const priceCents = parsePriceCents(key === "vasi" ? r.price_new : key === "masterclass" ? r.price : r.amount_eur);
+  if (priceCents === null || priceCents <= 0 || priceCents > MAX_PRICE_CENTS) return { id, error: "price" };
+  let maxQty = 1; // vasi: one-off pieces
+  if (key === "masterclass") {
+    const m = /\d+/.exec(String(r.spots || ""));
+    maxQty = m ? Number(m[0]) : 6; // "Max 6 persone" -> 6; no number -> 6 (as build-catalogue.py)
+  } else if (key === "certificati") {
+    maxQty = 10;
+  }
+  if (!Number.isInteger(maxQty) || maxQty < 1 || maxQty > MAX_QTY) return { id, error: "maxQty" };
+  const names = {};
+  for (const k of ["name_it", "name_en", "name_ru"]) names[k] = String(r[k] || "").trim();
+  const fallback = names.name_it || names.name_en || names.name_ru;
+  if (!fallback) return { id, error: "name" };
+  for (const k of Object.keys(names)) if (!names[k]) names[k] = fallback;
+  const file = String(r.img1 || "").trim();
+  if (file && file !== "-" && (!IMAGE_RE.test(file) || file.includes(".."))) return { id, error: "image" };
+  const image = file && file !== "-" ? tab.dir + file : "";
+  return {
+    id,
+    item: { type: key === "vasi" ? "physical" : "digital", ...names, priceCents, image, maxQty, sold: key === "vasi" ? parseSold(r.venduto) : false },
+  };
+}
+
 class SheetError extends Error {
   constructor(reason) {
     super(reason);
@@ -212,6 +275,55 @@ function parseCatalogueCsv(text) {
   return { items, dropped };
 }
 
+// Turns the CSV of one tab into {items: {id: item}, rows: [{id, row}], headers, dropped: [ids]}.
+// `row` holds only the whitelisted headers present in the sheet, values as in the sheet (BOM and
+// CR stripped). Throws SheetError when the tab as a whole must not be trusted: missing required
+// column, duplicate id inside the tab, zero valid rows or more than half of the rows invalid.
+function parseTabCsv(key, text) {
+  const tab = TABS[key];
+  let rows;
+  try {
+    rows = parseCsv(text);
+  } catch (_) {
+    throw new SheetError("csv_malformed");
+  }
+  if (!rows.length) throw new SheetError("csv_empty");
+  const head = rows[0].map((h) => h.trim().toLowerCase());
+  const idx = {};
+  for (const h of tab.headers) {
+    const i = head.indexOf(h);
+    if (i >= 0) idx[h] = i;
+  }
+  for (const h of tab.required) if (!(h in idx)) throw new SheetError("missing_column_" + h);
+  const headers = tab.headers.filter((h) => h in idx).sort((a, b) => idx[a] - idx[b]);
+  const seen = new Set();
+  const items = {};
+  const out = [];
+  const dropped = [];
+  let total = 0;
+  for (const cells of rows.slice(1)) {
+    if (cells.every((c) => !c.trim())) continue;
+    total++;
+    const obj = {};
+    for (const h of headers) obj[h] = String(cells[idx[h]] || "").replace(/\r/g, "");
+    const id = obj.id.trim();
+    if (id) {
+      if (seen.has(id)) throw new SheetError("duplicate_id");
+      seen.add(id);
+    }
+    const v = validateTabRow(key, obj);
+    if (v.error) {
+      dropped.push(id || "(empty)");
+    } else {
+      items[v.id] = v.item;
+      out.push({ id: v.id, row: obj });
+    }
+  }
+  if (!out.length) throw new SheetError("no_valid_rows");
+  if (dropped.length * 2 > total) throw new SheetError("too_many_invalid_rows");
+  return { items, rows: out, headers, dropped };
+}
+
 // ---- fetching --------------------------------------------------------------
 
 // Runs fn(signal) with an abort timer that also covers reading the body.
@@ -255,11 +367,11 @@ async function readCapped(res, max) {
   return t;
 }
 
-async function fetchSheet(url, fetchImpl, timeoutMs) {
+async function fetchSheet(url, fetchImpl, timeoutMs, parse) {
   return withTimeout(timeoutMs, async (signal) => {
     const res = await fetchImpl(url, { method: "GET", redirect: "follow", signal, headers: { Accept: "text/csv" } });
     if (!res.ok) throw new SheetError("http_" + res.status);
-    return parseCatalogueCsv(await readCapped(res, MAX_CSV_BYTES));
+    return parse(await readCapped(res, MAX_CSV_BYTES));
   });
 }
 
@@ -269,62 +381,141 @@ function snapshotItems() {
   return require("./catalogue.json");
 }
 
-// Copies the items and applies sold.json plus the locally marked ids.
-function withSold(items, soldList, nowMs) {
-  for (const [id, until] of state.local) if (until <= nowMs) state.local.delete(id);
+// Snapshot items of one tab: vases are the physical ones, the digital ones are told apart by
+// their image folder (masterclass vs gift cards), as build-catalogue.py wrote them.
+function snapshotTabItems(key) {
   const out = {};
-  for (const [id, p] of Object.entries(items)) {
-    const sold = !!p.sold || (Array.isArray(soldList) && soldList.includes(id)) || state.local.has(id);
-    out[id] = { type: p.type, name_it: p.name_it, name_en: p.name_en, name_ru: p.name_ru, priceCents: p.priceCents, image: p.image, maxQty: p.maxQty, sold };
+  for (const [id, p] of Object.entries(snapshotItems())) {
+    const k = p.type === "physical" ? "vasi" : String(p.image).startsWith(TABS.masterclass.dir) ? "masterclass" : "certificati";
+    if (k === key) out[id] = p;
   }
   return out;
 }
 
-// Returns the fresh or last good sheet content, or null (with the reason logged).
-async function loadSheet(env, fetchImpl, nowMs, timeoutMs) {
-  const chk = checkUrl(env.CATALOGUE_CSV_URL, CSV_HOST);
+function purgeLocal(nowMs) {
+  for (const [id, until] of state.local) if (until <= nowMs) state.local.delete(id);
+}
+
+function isSold(id, p, soldList) {
+  return !!p.sold || (Array.isArray(soldList) && soldList.includes(id)) || state.local.has(id);
+}
+
+function publicItem(p, sold) {
+  return { type: p.type, name_it: p.name_it, name_en: p.name_en, name_ru: p.name_ru, priceCents: p.priceCents, image: p.image, maxQty: p.maxQty, sold };
+}
+
+// Copies the items and applies sold.json plus the locally marked ids.
+function withSold(items, soldList, nowMs) {
+  purgeLocal(nowMs);
+  const out = {};
+  for (const [id, p] of Object.entries(items)) out[id] = publicItem(p, isSold(id, p, soldList));
+  return out;
+}
+
+// Returns {data, source} with the fresh or last good content of one sheet (slot `name`, env
+// variable `varName`, parser `parse`), or null (with the reason logged).
+async function loadSource(name, varName, parse, env, fetchImpl, nowMs, timeoutMs) {
+  const tag = name === "legacy" ? {} : { tab: name };
+  const chk = checkUrl(env[varName], CSV_HOST);
   if (!chk.url) {
     const ev = chk.reason === "not_configured" ? "catalogue_source_not_configured" : "catalogue_source_rejected";
-    warnOnce(ev + chk.reason, { event: ev, variable: "CATALOGUE_CSV_URL", reason: chk.reason, fallback: "snapshot" });
+    warnOnce(ev + varName + chk.reason, { event: ev, variable: varName, reason: chk.reason, fallback: "snapshot" });
     return null;
   }
-  if (state.cache && nowMs - state.cache.at < CACHE_TTL_MS) return { sheet: state.cache, source: "sheet" };
-  const staleOk = state.cache && nowMs - state.cache.at <= STALE_MAX_MS;
-  const stale = () => (staleOk ? { sheet: state.cache, source: "stale" } : null);
-  if (state.failedAt && nowMs - state.failedAt < FAIL_BACKOFF_MS) return stale();
+  const slot = slotOf(name);
+  if (slot.cache && nowMs - slot.cache.at < CACHE_TTL_MS) return { data: slot.cache.data, source: "sheet" };
+  const staleOk = slot.cache && nowMs - slot.cache.at <= STALE_MAX_MS;
+  const stale = () => (staleOk ? { data: slot.cache.data, source: "stale" } : null);
+  if (slot.failedAt && nowMs - slot.failedAt < FAIL_BACKOFF_MS) return stale();
   if (!fetchImpl) return stale();
-  if (!state.inflight) {
-    state.inflight = fetchSheet(chk.url, fetchImpl, timeoutMs).finally(() => {
-      state.inflight = null;
+  if (!slot.inflight) {
+    slot.inflight = fetchSheet(chk.url, fetchImpl, timeoutMs, parse).finally(() => {
+      slot.inflight = null;
     });
   }
   try {
-    const { items, dropped } = await state.inflight;
-    state.cache = { items, at: nowMs };
-    state.failedAt = 0;
-    if (dropped.length) logLine("warn", { event: "catalogue_rows_dropped", count: dropped.length, ids: dropped.slice(0, MAX_LOGGED_IDS) });
-    return { sheet: state.cache, source: "sheet" };
+    const data = await slot.inflight;
+    slot.cache = { data, at: nowMs };
+    slot.failedAt = 0;
+    if (data.dropped.length) logLine("warn", { event: "catalogue_rows_dropped", ...tag, count: data.dropped.length, ids: data.dropped.slice(0, MAX_LOGGED_IDS) });
+    return { data, source: "sheet" };
   } catch (err) {
-    state.failedAt = nowMs;
+    slot.failedAt = nowMs;
     const fallback = staleOk ? "stale" : "snapshot";
-    logLine("warn", { event: "catalogue_fetch_failed", host: chk.host, reason: failureReason(err), fallback });
+    logLine("warn", { event: "catalogue_fetch_failed", ...tag, host: chk.host, reason: failureReason(err), fallback });
     return stale();
   }
 }
 
-// Returns {items: {id: {type,name_it,name_en,name_ru,priceCents,image,maxQty,sold}}, source}
-// with source "sheet" | "stale" | "snapshot". Never throws.
+// Three-tab mode: every tab falls back on its own (stale copy, then snapshot items of its type).
+// Merges the tabs in order vasi, masterclass, certificati: an id already taken by an earlier tab
+// is rejected from the later one (warn, id only). Returns the getCatalogue() result.
+async function getTabbed(env, fetchImpl, nowMs, timeoutMs, soldList) {
+  const loaded = await Promise.all(
+    TAB_KEYS.map(async (key) => {
+      try {
+        return await loadSource(key, TABS[key].env, (t) => parseTabCsv(key, t), env, fetchImpl, nowMs, timeoutMs);
+      } catch (err) {
+        logLine("warn", { event: "catalogue_fetch_failed", tab: key, reason: failureReason(err), fallback: "snapshot" });
+        return null;
+      }
+    })
+  );
+  purgeLocal(nowMs);
+  const items = {};
+  const sources = {};
+  const tabs = {};
+  TAB_KEYS.forEach((key, i) => {
+    const l = loaded[i];
+    const own = l ? l.data.items : snapshotTabItems(key);
+    sources[key] = l ? l.source : "snapshot";
+    const taken = new Set();
+    for (const [id, p] of Object.entries(own)) {
+      if (Object.prototype.hasOwnProperty.call(items, id)) {
+        warnOnce("dup" + key + id, { event: "catalogue_duplicate_id", tab: key, id });
+        continue;
+      }
+      taken.add(id);
+      items[id] = publicItem(p, isSold(id, p, soldList));
+    }
+    if (!l) {
+      tabs[key] = null; // the site falls back to its own ODS files
+      return;
+    }
+    const rows = l.data.rows.filter((r) => taken.has(r.id)).map((r) => {
+      const row = { ...r.row };
+      // effective sold state (sheet OR sold.json OR marked locally), so the site needs no other logic
+      if (key === "vasi") row.venduto = items[r.id].sold ? "si" : String(row.venduto || "").trim() ? row.venduto : "no";
+      return row;
+    });
+    tabs[key] = { headers: l.data.headers.slice(), rows };
+  });
+  const source = Object.values(sources).reduce((w, s) => (RANK[s] > RANK[w] ? s : w), "sheet");
+  return { items, source, sources, tabs };
+}
+
+// Returns {items: {id: {type,name_it,name_en,name_ru,priceCents,image,maxQty,sold}}, source,
+// sources: {vasi,masterclass,certificati}, tabs: {vasi,masterclass,certificati}} with source
+// "sheet" | "stale" | "snapshot" (worst of the tabs) and tabs.<tab> = {headers, rows} (display
+// data, null when that tab is served from the snapshot). Never throws.
 async function getCatalogue({ fetchImpl = globalThis.fetch, now = Date.now, env = process.env, soldList, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const nowMs = now();
   const sold = soldList === undefined ? require("./sold.json") : soldList;
-  let loaded = null;
+  env = env || {};
+  const same = (source) => ({ source, sources: { vasi: source, masterclass: source, certificati: source }, tabs: { vasi: null, masterclass: null, certificati: null } });
   try {
-    loaded = await loadSheet(env || {}, fetchImpl, nowMs, timeoutMs);
+    if (TAB_KEYS.some((k) => env[TABS[k].env] && String(env[TABS[k].env]).trim())) return await getTabbed(env, fetchImpl, nowMs, timeoutMs, sold);
+    if (env.CATALOGUE_CSV_URL && String(env.CATALOGUE_CSV_URL).trim()) {
+      // DEPRECATED single 9-column sheet, only when none of the tab variables is set.
+      const l = await loadSource("legacy", "CATALOGUE_CSV_URL", parseCatalogueCsv, env, fetchImpl, nowMs, timeoutMs);
+      if (l) return { items: withSold(l.data.items, sold, nowMs), ...same(l.source) };
+    } else {
+      warnOnce("not_configured", { event: "catalogue_source_not_configured", variable: TAB_KEYS.map((k) => TABS[k].env).join(","), reason: "not_configured", fallback: "snapshot" });
+    }
   } catch (err) {
     logLine("warn", { event: "catalogue_fetch_failed", reason: failureReason(err), fallback: "snapshot" });
   }
-  if (loaded) return { items: withSold(loaded.sheet.items, sold, nowMs), source: loaded.source };
-  return { items: withSold(snapshotItems(), sold, nowMs), source: "snapshot" };
+  return { items: withSold(snapshotItems(), sold, nowMs), ...same("snapshot") };
 }
 
 // Treat these ids as sold immediately, before the published CSV catches up.
@@ -356,7 +547,11 @@ async function postOnce(url, payload, fetchImpl, timeoutMs) {
       } catch (_) {
         return { ok: false, reason: "non_json", retry: true };
       }
-      if (body && body.ok === true) return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [] };
+      // An ok reply that does not name the Vasi tab comes from an old, not yet redeployed script.
+      if (body && body.ok === true) {
+        if (body.sheet !== SHEET_NAME) return { ok: false, reason: "script_outdated", retry: false };
+        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [] };
+      }
       if (body && typeof body.error === "string" && /^[a-z_]{1,30}$/.test(body.error)) return { ok: false, reason: body.error, retry: false };
       return { ok: false, reason: res.ok ? "rejected" : "http_" + res.status, retry: !res.ok && res.status >= 500 };
     });
@@ -366,7 +561,8 @@ async function postOnce(url, payload, fetchImpl, timeoutMs) {
 }
 
 // Marks ids as sold in the sheet. Never throws. Resolves
-//   {ok:true, marked}  |  {ok:false, reason}  (reason "not_configured" when env is unset)
+//   {ok:true, marked}  |  {ok:false, reason}  (reason "not_configured" when env is unset,
+//   "script_outdated" when an ok reply does not name the Vasi tab)
 // Retries (up to 2, short backoff) only on network errors, timeouts, 5xx and non-JSON answers.
 async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, sleep = defaultSleep, timeoutMs = FETCH_TIMEOUT_MS } = {}) {
   const secret = env && env.CATALOGUE_WRITE_SECRET;
@@ -393,6 +589,7 @@ module.exports = {
   markSoldLocal,
   parseCsv,
   parseCatalogueCsv,
+  parseTabCsv,
   parsePriceCents,
   parseSold,
   checkUrl,

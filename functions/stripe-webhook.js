@@ -6,7 +6,7 @@
 // Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, OWNER_NOTIFY_WEBHOOK_URL (optional, https only),
 // CATALOGUE_WRITE_URL / CATALOGUE_WRITE_SECRET (optional, see _catalogue-source.js).
 // Paid orders also mark the ordered one-off physical pieces (maxQty 1) as sold in the Google
-// Sheet. Marking problems never change the 200 answer to Stripe: the owner is told to mark by hand.
+// Sheet (tab Vasi). Marking problems never change the 200 answer to Stripe: the owner is told to mark by hand.
 // Idempotency: stateless. Stripe may retry/duplicate deliveries (same event.id);
 // the notification is informational only, so a duplicate is harmless. event.id is logged
 // so duplicates can be spotted. Customer PII (name, email, phone, address, note) is never
@@ -194,7 +194,7 @@ function makeHandler({
           const { items } = await getCatalogue({ fetchImpl, env });
           pieces = uniquePieceIds(ids, items);
           if (!pieces.length) return "";
-          const manual = `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually`;
+          const manualLine = (why) => `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually${why === "script_outdated" ? " (Apps Script needs updating)" : ""}`;
           markSoldLocal(pieces); // sold at once, before the published CSV catches up
           localDone = true;
           let timer;
@@ -209,7 +209,7 @@ function makeHandler({
           const reason = (r && r.reason) || "unknown";
           if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces });
           else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, reason: safeText(reason, 60) });
-          return manual;
+          return manualLine(reason);
         } catch (err) {
           try {
             if (pieces.length && !localDone) markSoldLocal(pieces);

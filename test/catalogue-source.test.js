@@ -270,7 +270,7 @@ const jsonRes = (o, status = 200) => new Response(JSON.stringify(o), { status })
 const nosleep = async () => {};
 
 test("markSold: POSTs {secret, ids} with redirect follow and accepts ok:true JSON", async () => {
-  const f = fakeFetch(jsonRes({ ok: true, marked: ["v3"] }));
+  const f = fakeFetch(jsonRes({ ok: true, marked: ["v3"], sheet: "Vasi" }));
   const r = await src.markSold(["v3"], { fetchImpl: f, env: wenv, sleep: nosleep });
   assert.deepEqual(r, { ok: true, marked: ["v3"] });
   assert.equal(f.calls.length, 1);
@@ -302,7 +302,7 @@ test("markSold: not configured / bad host / http -> no fetch", async () => {
 test("markSold: retries network errors, 5xx and non-JSON (max 2 retries), succeeds on a later attempt", async () => {
   const waits = [];
   const sleep = async (ms) => waits.push(ms);
-  let f = fakeFetch(new Error("ECONNRESET"), new Response("<html>oops</html>", { status: 200 }), jsonRes({ ok: true, marked: ["v3"] }));
+  let f = fakeFetch(new Error("ECONNRESET"), new Response("<html>oops</html>", { status: 200 }), jsonRes({ ok: true, marked: ["v3"], sheet: "Vasi" }));
   assert.equal((await src.markSold(["v3"], { fetchImpl: f, env: wenv, sleep })).ok, true);
   assert.equal(f.calls.length, 3);
   assert.equal(waits.length, 2);

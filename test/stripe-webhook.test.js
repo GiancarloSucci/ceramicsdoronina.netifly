@@ -410,7 +410,7 @@ test("end to end with the real markSold and a fake Apps Script fetch (redirect f
   let n = 0;
   const fetchImpl = async (url, o) => {
     posts.push([url, o]);
-    return ++n === 1 ? new Response("err", { status: 503 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"] }), { status: 200 });
+    return ++n === 1 ? new Response("err", { status: 503 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"], sheet: "Vasi" }), { status: 200 });
   };
   const sent = [];
   const cap = capture();
@@ -442,7 +442,7 @@ test("a just-marked piece is sold immediately in the catalogue source, even if t
     stripeFactory: () => fake(evtOf("checkout.session.completed", sess("v3"))),
     env: { ...wenv, CATALOGUE_CSV_URL: "https://docs.google.com/spreadsheets/d/e/T/pub?output=csv" },
     notify: async () => {},
-    fetchImpl: async (url) => (String(url).includes("docs.google.com") ? new Response(csv, { status: 200 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"] }), { status: 200 })),
+    fetchImpl: async (url) => (String(url).includes("docs.google.com") ? new Response(csv, { status: 200 }) : new Response(JSON.stringify({ ok: true, marked: ["v3"], sheet: "Vasi" }), { status: 200 })),
   });
   const cap = capture();
   try {
