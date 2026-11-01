@@ -280,6 +280,11 @@ function createEvent_(disp, rowIdx, b, sessionId, customer) {
 }
 
 // Run once from the editor (Run > authorize) to grant the Google Calendar permission; returns the calendar name.
+// Public health check: opening the /exec URL in a browser shows which code is deployed. No secret, no data, only the version.
+function doGet() {
+  return out_({ ok: true, script: 'ceramicsdoronina-catalogue', version: 3 });
+}
+
 function authorize() {
   return CalendarApp.getDefaultCalendar().getName();
 }

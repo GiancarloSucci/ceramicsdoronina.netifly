@@ -64,6 +64,7 @@ function script(sheets, secret = "S", { props = {}, calendar = fakeCalendar() } 
   const call = (body) => JSON.parse(ctx.doPost({ postData: { contents: typeof body === "string" ? body : JSON.stringify(body) } }));
   call.calendar = calendar;
   call.authorize = () => ctx.authorize();
+  call.get = () => JSON.parse(ctx.doGet());
   return call;
 }
 const SKIP = { status: "skipped", reason: "bad_date" }; // the default fixture has no date/time columns
@@ -323,4 +324,9 @@ test("calendar: no customer data in Ordini or in the reply", () => {
   const raw = JSON.stringify(call({ secret: "S", session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 1 }], customer: { email: "ann@example.com", name: "Ann" } }));
   assert.ok(!raw.includes("ann@example.com") && !raw.includes("Ann"));
   assert.ok(!JSON.stringify(s.Ordini).includes("ann@example.com"));
+});
+
+test("doGet names the deployed contract version and nothing else (no secret, no sheet data)", () => {
+  const r = script(fresh(), "TOPSECRET").get();
+  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 3 });
 });
