@@ -118,13 +118,16 @@ test("blank seats_total (or no column) means unlimited: total null, never overbo
   assert.deepEqual(v, { ok: true, version: 8, sheet: "Vasi", marked: ["v1"], booked: [] });
 });
 
-test("limited seats_total above 8 and seats 20 work; seats 21 is rejected", () => {
+test("limited seats_total above 8 and seats 20 work; seats up to 999 are valid, 1000 is rejected", () => {
   const s = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", 30, 5]] };
   const call = script(s);
   const r = call({ secret: "S", session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 20 }] });
   assert.deepEqual([r.booked[0].booked_after, r.booked[0].total, r.booked[0].overbooked], [25, 30, false]);
   assert.equal(call({ secret: "S", session_id: "cs_2", ids: [], bookings: [{ id: "mc1", seats: 6 }] }).booked[0].overbooked, true);
-  assert.equal(call({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 21 }] }).error, "bad_bookings");
+  assert.equal(call({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1000 }] }).error, "bad_bookings");
+  assert.equal(call({ secret: "S", session_id: "cs_4", ids: [], bookings: [{ id: "mc1", seats: 999 }] }).booked[0].overbooked, true, "999 accepted (and overbooks 30 seats)");
+  const free = script({ ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", "", 0]] });
+  assert.deepEqual([21, 150, 999].map((n, i) => free({ secret: "S", session_id: "cs_u" + i, ids: [], bookings: [{ id: "mc1", seats: n }] }).booked[0].overbooked), [false, false, false]);
 });
 
 test("safety: secret, JSON, id shape, seats range and integer, array caps", () => {
@@ -138,7 +141,7 @@ test("safety: secret, JSON, id shape, seats range and integer, array caps", () =
   assert.equal(err({ secret: "S", ids: [5] }), "bad_ids");
   assert.equal(err({ secret: "S", ids: Array(31).fill("v1") }), "bad_ids");
   const bk = (b) => err({ secret: "S", session_id: "cs", ids: [], bookings: [b] });
-  for (const b of [{ id: "mc1", seats: 0 }, { id: "mc1", seats: 21 }, { id: "mc1", seats: 1.5 }, { id: "mc1", seats: "2" }, { id: "MC1", seats: 1 }, { id: "mc1" }, null]) assert.equal(bk(b), "bad_bookings", JSON.stringify(b));
+  for (const b of [{ id: "mc1", seats: 0 }, { id: "mc1", seats: 1000 }, { id: "mc1", seats: 1.5 }, { id: "mc1", seats: "2" }, { id: "MC1", seats: 1 }, { id: "mc1" }, null]) assert.equal(bk(b), "bad_bookings", JSON.stringify(b));
   assert.equal(err({ secret: "S", ids: [], bookings: [{ id: "mc1", seats: 1 }] }), "bad_bookings", "session_id required");
   assert.equal(err({ secret: "S", session_id: "cs", ids: [], bookings: Array(31).fill({ id: "mc1", seats: 1 }) }), "bad_bookings");
   assert.equal(s.Masterclass[1][2], "", "nothing written by rejected calls");
@@ -227,6 +230,9 @@ test("calendar: titles by locale with fallbacks and Russian plurals; customer fi
   assert.equal(titles("ru", 4), "Базовый курс (4 человека)");
   assert.equal(titles("ru", 5), "Базовый курс (5 человек)");
   assert.equal(titles("ru", 8), "Базовый курс (8 человек)");
+  for (const [n, w] of [[11, "человек"], [12, "человек"], [21, "человек"], [22, "человека"], [25, "человек"], [101, "человек"], [111, "человек"], [112, "человек"], [122, "человека"], [999, "человек"]]) assert.equal(titles("ru", n), `Базовый курс (${n} ${w})`, "ru " + n);
+  assert.equal(titles("en", 150), "Basic class (150 people)");
+  assert.equal(titles("it", 150), "Corso base (150 persone)");
   assert.equal(titles("xx", 2), "Corso base (2 persone)", "unknown locale = it");
   assert.equal(titles("it", 2, "mc2"), "Only EN (2 persone)", "fallback it, en, ru");
   const s = cal();

@@ -37,7 +37,7 @@ var MAX_EMAIL = 254;
 var MAX_NAME = 100;
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
-var MAX_SEATS = 20;
+var MAX_SEATS = 999; // persons in ONE booking (1..999; linear pricing is not limited to 20)
 var VERSION = 8; // Version
 
 function doPost(e) {
@@ -223,7 +223,12 @@ function parseLocal_(day, hm) {
 
 function personsLabel_(n, locale) {
   if (locale === 'en') return n === 1 ? '1 person' : n + ' people';
-  if (locale === 'ru') return n + (n === 1 ? ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a' : n >= 2 && n <= 4 ? ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u0430' : ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a');
+  if (locale === 'ru') {
+    // general Russian plural rule: n%10 and n%100 (1, 21, 101 singular; 2-4, 22-24 paucal; 5-20, 11-14, 25-30 genitive plural)
+    var m10 = n % 10;
+    var m100 = n % 100;
+    return n + (m10 === 1 && m100 !== 11 ? ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a' : m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u0430' : ' \u0447\u0435\u043b\u043e\u0432\u0435\u043a');
+  }
   return n === 1 ? '1 persona' : n + ' persone';
 }
 
