@@ -4,6 +4,10 @@
 //    sources:{vasi,masterclass,certificati},
 //    items:[{id,type,name_it,name_en,name_ru,priceCents,image,maxQty,sold}],   (as in version 1)
 //    tabs:{vasi,masterclass,certificati}}   each {headers:[...], rows:[{header: value}]} or null
+// Masterclass items add tiersCents (total cents of a booking of 1..8 persons, null = not bookable),
+// seatsTotal, seatsBooked, seatsFree; maxQty is then the largest bookable group. Masterclass rows
+// (seat schema) carry the effective seats_booked (sheet + paid bookings the CSV does not show yet)
+// and one COMPUTED field, seats_free (the only field not taken from the sheet).
 // tabs hold the whitelisted display columns of the sheet tabs (never shopify_variant_id or notes);
 // null (tab served from the snapshot) tells the site to use its own ODS files.
 // Same data create-checkout charges from (see _catalogue-source.js), so the shop page
@@ -13,6 +17,7 @@ const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
 const { safeText } = require("./_shared.js");
 
 const FIELDS = ["type", "name_it", "name_en", "name_ru", "priceCents", "image", "maxQty", "sold"];
+const SEAT_FIELDS = ["tiersCents", "seatsTotal", "seatsBooked", "seatsFree"]; // masterclass items only
 
 function makeHandler({ env = process.env, getCatalogue = defaultGetCatalogue, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   return async function handler(event) {
@@ -38,6 +43,7 @@ function makeHandler({ env = process.env, getCatalogue = defaultGetCatalogue, fe
         .map((id) => {
           const o = { id };
           for (const k of FIELDS) o[k] = items[id][k];
+          if (items[id].tiersCents) for (const k of SEAT_FIELDS) o[k] = items[id][k];
           return o;
         });
       const same = (v) => ({ vasi: v, masterclass: v, certificati: v });

@@ -7,7 +7,16 @@ const path = require("node:path");
 const src = require("../functions/_catalogue-source.js");
 const { makeHandler } = require("../functions/catalogue.js");
 const { makeHandler: makeWebhook } = require("../functions/stripe-webhook.js");
-const snapshot = require("../functions/catalogue.json");
+const snapshotRaw = require("../functions/catalogue.json");
+// The snapshot as the functions serve it: masterclass items (digital, images/masterclass/) also carry the
+// linear seat fields (tiers 1..min(8,maxQty) x price, null above; nothing booked), derived here independently.
+const snapshot = Object.fromEntries(
+  Object.entries(snapshotRaw).map(([id, p]) => {
+    if (!(p.type === "digital" && p.image.startsWith("images/masterclass/"))) return [id, p];
+    const tiersCents = Array.from({ length: 8 }, (_, i) => (i < p.maxQty ? p.priceCents * (i + 1) : null));
+    return [id, { ...p, tiersCents, seatsTotal: p.maxQty, seatsBooked: 0, seatsFree: p.maxQty }];
+  })
+);
 
 const fx = (n) => fs.readFileSync(path.join(__dirname, "fixtures", n), "utf8");
 const TAB_CSV = { vasi: fx("catalogue-tab-Vasi.csv"), masterclass: fx("catalogue-tab-Masterclass.csv"), certificati: fx("catalogue-tab-Certificati.csv") };
@@ -192,7 +201,11 @@ test("endpoint version 2: shape, sorted items, tabs, headers", async () => {
   assert.equal(body.source, "sheet");
   assert.deepEqual(body.sources, { vasi: "sheet", masterclass: "sheet", certificati: "sheet" });
   assert.deepEqual(body.items.map((i) => i.id), Object.keys(snapshot).sort());
-  for (const it of body.items) assert.deepEqual(Object.keys(it).sort(), ["id", "image", "maxQty", "name_en", "name_it", "name_ru", "priceCents", "sold", "type"]);
+  const BASE = ["id", "image", "maxQty", "name_en", "name_it", "name_ru", "priceCents", "sold", "type"];
+  for (const it of body.items) {
+    const mc = it.image.startsWith("images/masterclass/");
+    assert.deepEqual(Object.keys(it).sort(), mc ? [...BASE, "seatsBooked", "seatsFree", "seatsTotal", "tiersCents"].sort() : BASE);
+  }
   assert.deepEqual(Object.keys(body.tabs), ["vasi", "masterclass", "certificati"]);
   assert.deepEqual(body.tabs.masterclass.headers, HEADERS.masterclass);
   assert.equal(body.tabs.masterclass.rows[0].spots, "Max 6 persone");
@@ -329,7 +342,7 @@ test("legacy mode: only CATALOGUE_CSV_URL set -> single CSV still works (tabs nu
   assert.equal(r.source, "sheet");
   assert.deepEqual(r.sources, { vasi: "sheet", masterclass: "sheet", certificati: "sheet" });
   assert.deepEqual(r.tabs, { vasi: null, masterclass: null, certificati: null });
-  assert.deepEqual(r.items, JSON.parse(JSON.stringify(snapshot)));
+  assert.deepEqual(r.items, JSON.parse(JSON.stringify(snapshotRaw))); // single 9-column sheet: no seat fields
   const h = makeHandler({ env: lenv, fetchImpl: f, now: clock() });
   const body = JSON.parse((await h({ httpMethod: "GET", headers: {} })).body);
   assert.equal(body.version, 2);
