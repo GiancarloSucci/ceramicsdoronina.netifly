@@ -77,7 +77,7 @@ test("marks vases and books seats in one call (v2 reply)", () => {
   const s = fresh();
   const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 2 }, { id: "nope", seats: 1 }] });
   assert.deepEqual(r, {
-    ok: true, version: 3, sheet: "Vasi", marked: ["v3"],
+    ok: true, version: 5, sheet: "Vasi", marked: ["v3"],
     booked: [
       { id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false, calendar: SKIP }, // blank seats_booked = 0
       { id: "mc2", seats: 2, booked_after: 5, total: 4, overbooked: true, duplicate: false, calendar: SKIP }, // recorded anyway
@@ -108,7 +108,7 @@ test("blank seats_total counts as 8; vase-only calls keep working", () => {
   const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc3", seats: 2 }] });
   assert.deepEqual([r.booked[0].booked_after, r.booked[0].total, r.booked[0].overbooked], [9, 8, true]);
   const v = script(fresh())({ secret: "S", ids: ["v1"] });
-  assert.deepEqual(v, { ok: true, version: 3, sheet: "Vasi", marked: ["v1"], booked: [] });
+  assert.deepEqual(v, { ok: true, version: 5, sheet: "Vasi", marked: ["v1"], booked: [] });
 });
 
 test("safety: secret, JSON, id shape, seats range and integer, array caps", () => {
@@ -328,5 +328,5 @@ test("calendar: no customer data in Ordini or in the reply", () => {
 
 test("doGet names the deployed contract version and nothing else (no secret, no sheet data)", () => {
   const r = script(fresh(), "TOPSECRET").get();
-  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 3 });
+  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 5 });
 });
