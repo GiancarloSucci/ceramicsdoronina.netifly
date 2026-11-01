@@ -103,12 +103,28 @@ test("idempotent per session and item: a retry reports duplicate and changes not
   assert.equal(call({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1 }] }).booked[0].overbooked, true);
 });
 
-test("blank seats_total counts as 8; vase-only calls keep working", () => {
+test("blank seats_total (or no column) means unlimited: total null, never overbooked; vase-only calls keep working", () => {
   const s = fresh();
-  const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc3", seats: 2 }] });
-  assert.deepEqual([r.booked[0].booked_after, r.booked[0].total, r.booked[0].overbooked], [9, 8, true]);
+  const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc3", seats: 20 }] });
+  assert.deepEqual([r.booked[0].booked_after, r.booked[0].total, r.booked[0].overbooked], [27, null, false]);
+  const again = script(s)({ secret: "S", session_id: "cs_1", ids: [], bookings: [{ id: "mc3", seats: 20 }] });
+  assert.deepEqual([again.booked[0].total, again.booked[0].overbooked, again.booked[0].duplicate], [null, false, true]);
+  const noCol = { ...fresh(), Masterclass: [["id", "seats_booked"], ["mc1", 100]] };
+  const n = script(noCol)({ secret: "S", session_id: "cs_2", ids: [], bookings: [{ id: "mc1", seats: 1 }] });
+  assert.deepEqual([n.booked[0].booked_after, n.booked[0].total, n.booked[0].overbooked], [101, null, false]);
+  const text = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", "many", 5]] };
+  assert.deepEqual([script(text)({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1 }] }).booked[0].total], [null], "non-numeric cell: unknown");
   const v = script(fresh())({ secret: "S", ids: ["v1"] });
   assert.deepEqual(v, { ok: true, version: 7, sheet: "Vasi", marked: ["v1"], booked: [] });
+});
+
+test("limited seats_total above 8 and seats 20 work; seats 21 is rejected", () => {
+  const s = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", 30, 5]] };
+  const call = script(s);
+  const r = call({ secret: "S", session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 20 }] });
+  assert.deepEqual([r.booked[0].booked_after, r.booked[0].total, r.booked[0].overbooked], [25, 30, false]);
+  assert.equal(call({ secret: "S", session_id: "cs_2", ids: [], bookings: [{ id: "mc1", seats: 6 }] }).booked[0].overbooked, true);
+  assert.equal(call({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 21 }] }).error, "bad_bookings");
 });
 
 test("safety: secret, JSON, id shape, seats range and integer, array caps", () => {

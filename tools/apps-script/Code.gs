@@ -11,7 +11,7 @@
 // ids: unique pieces, marked venduto = 'si' in the tab Vasi. bookings: in the tab Masterclass the column
 // seats_booked of the row with that id grows by `seats` (blank = 0), once per (session_id, id): the tab
 // Ordini (created if missing; session_id, item_id, seats, at, event_id) remembers what was applied, so a Stripe
-// retry reports duplicate:true and changes nothing. overbooked = booked_after > seats_total (a number; blank = 8): the booking
+// retry reports duplicate:true and changes nothing. overbooked = booked_after > seats_total (a number; blank = unlimited): the booking
 // is still recorded and the owner is told to refund or move it. Only ids are stored in the sheet, never customer data.
 // Calendar: every booking gets ITS OWN event in the owner's calendar (never added to another booking's event),
 // inviting the customer and the colleagues in the script property OWNER_GUEST_EMAIL (comma separated). Guests
@@ -38,7 +38,6 @@ var MAX_NAME = 100;
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
 var MAX_SEATS = 20;
-var DEFAULT_SEATS = 8;
 var VERSION = 7; // Version
 
 function doPost(e) {
@@ -145,9 +144,10 @@ function book_(ss, sessionId, bookings, customer) {
       }
     }
     if (row < 0) continue;
-    // seats_total blank (or no such column) means 8, as in the Netlify function; any other non-number: unknown
+    // seats_total blank (or no such column) means unlimited, as in the Netlify function: total null, never overbooked;
+    // any other non-number: unknown (null too)
     var cell = totalCol >= 0 ? data[row][totalCol] : '';
-    var total = cell === '' ? DEFAULT_SEATS : typeof cell === 'number' ? cell : null;
+    var total = typeof cell === 'number' ? cell : null;
     var current = Number(data[row][bookedCol]);
     if (isNaN(current)) current = 0; // blank or text counts as 0
     var prev = done[sessionId + '|' + b.id];
