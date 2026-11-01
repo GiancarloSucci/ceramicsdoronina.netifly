@@ -6,13 +6,18 @@
 // Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, OWNER_NOTIFY_WEBHOOK_URL (optional, https only),
 // CATALOGUE_WRITE_URL / CATALOGUE_WRITE_SECRET (optional, see _catalogue-source.js).
 // Paid orders also mark the ordered one-off physical pieces (maxQty 1) as sold in the Google
-// Sheet (tab Vasi). Marking problems never change the 200 answer to Stripe: the owner is told to mark by hand.
+// Sheet (tab Vasi) and book the ordered masterclass seats (session metadata `bookings`, "mc1:2,mc3:1")
+// in the tab Masterclass (column seats_booked), in ONE Apps Script call (contract v2: POST
+// {secret, session_id, ids, bookings}, reply {ok, version:2, sheet:"Vasi", marked, booked:[{id, seats,
+// booked_after, total, overbooked, duplicate}]}). Marking problems never change the 200 answer to Stripe:
+// the owner is told to mark by hand. Booked seats also count locally for 15 minutes (per session id, so
+// Stripe retries never count twice), until the published CSV catches up.
 // Idempotency: stateless. Stripe may retry/duplicate deliveries (same event.id);
 // the notification is informational only, so a duplicate is harmless. event.id is logged
 // so duplicates can be spotted. Customer PII (name, email, phone, address, note) is never
 // logged; only ids, totals, currency, payment status and country.
 const crypto = require("crypto");
-const { defaultStripeFactory, decodeBody, safeText } = require("./_shared.js");
+const { defaultStripeFactory, decodeBody, safeText, parseBookings } = require("./_shared.js");
 const catalogueSource = require("./_catalogue-source.js");
 
 const HANDLED = [
@@ -56,7 +61,7 @@ const HEADERS = {
 };
 
 // kind: "paid" | "awaiting" | "failed" (defaults from session.payment_status)
-function buildOrderSummary(session, lineItems = [], itemIds = "", kind = paymentKind(session)) {
+function buildOrderSummary(session, lineItems = [], itemIds = "", kind = paymentKind(session), bookings = parseBookings(session.metadata && session.metadata.bookings)) {
   const cd = session.customer_details || {};
   const sd = session.shipping_details || session.collected_information?.shipping_details || null;
   const shipText = sd && sd.address ? addressText(sd.name, sd.address) : "";
@@ -75,6 +80,7 @@ function buildOrderSummary(session, lineItems = [], itemIds = "", kind = payment
     billText ? `Billing: ${billText}` : "",
     `Items: ${names.length ? names.join("; ") : clean(ids) || "(unknown)"}`,
     `Catalogue ids: ${clean(ids)}`,
+    bookings.length ? `Masterclass persons: ${bookings.map((b) => `${clean(b.id, 40)} x ${b.seats}`).join("; ")}` : "",
     `Total: ${total} ${clean(String(session.currency || "eur").toUpperCase(), 10)}`,
     noteText ? `Note: ${noteText}` : "",
   ]
@@ -134,6 +140,7 @@ function makeHandler({
   getCatalogue = catalogueSource.getCatalogue,
   markSold = catalogueSource.markSold,
   markSoldLocal = catalogueSource.markSoldLocal,
+  markBookedLocal = catalogueSource.markBookedLocal,
   fetchImpl = globalThis.fetch,
 } = {}) {
   return async function handler(event) {
@@ -185,37 +192,67 @@ function makeHandler({
         log("warn", { event: "list_line_items_failed", session_id: session.id });
       }
       const itemIds = (session.metadata && session.metadata.item_ids) || "";
-      // Returns the "ACTION: ..." line for the owner when the sheet could not be marked, else "".
-      // Never throws: marking problems must not turn into a non-200 answer to Stripe.
-      const markPaidPieces = async (ids, sess, evt) => {
+      // Marks the ordered unique pieces as sold and books the masterclass seats (one Apps Script call).
+      // Returns the lines for the owner ("ACTION: ..." / "OVERBOOKED ...", joined by newlines), "" when all
+      // went well. Never throws: marking problems must not turn into a non-200 answer to Stripe.
+      const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
         let localDone = false;
-        try {
-          const { items } = await getCatalogue({ fetchImpl, env });
-          pieces = uniquePieceIds(ids, items);
-          if (!pieces.length) return "";
-          const manualLine = (why) => `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually${why === "script_outdated" ? " (Apps Script needs updating)" : ""}`;
-          markSoldLocal(pieces); // sold at once, before the published CSV catches up
+        const bookings = parseBookings(sess.metadata && sess.metadata.bookings);
+        const book = bookings.map((b) => `${b.id}:${b.seats}`);
+        const lines = [];
+        const manual = (why) => {
+          const out = [];
+          const hint = why === "script_outdated" ? " (Apps Script needs updating)" : "";
+          if (pieces.length) out.push(`ACTION: mark ${pieces.join(", ")} as sold in the sheet manually${hint}`);
+          for (const b of bookings) out.push(`ACTION: add ${b.seats} seats to ${b.id} in the sheet manually (seats_booked)${hint}`);
+          return out;
+        };
+        const localEffects = () => {
+          if (pieces.length) markSoldLocal(pieces); // sold at once, before the published CSV catches up
+          if (bookings.length) markBookedLocal(bookings, { sessionId: sess.id }); // seats taken at once, once per session
           localDone = true;
+        };
+        try {
+          if (ids) {
+            const { items } = await getCatalogue({ fetchImpl, env });
+            pieces = uniquePieceIds(ids, items);
+          }
+          if (!pieces.length && !bookings.length) return "";
+          localEffects();
           let timer;
           const deadline = new Promise((resolve) => {
             timer = setTimeout(() => resolve({ ok: false, reason: "deadline" }), MARK_DEADLINE_MS);
           });
-          const r = await Promise.race([markSold(pieces, { fetchImpl, env }), deadline]).finally(() => clearTimeout(timer));
+          const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id }), deadline]).finally(() => clearTimeout(timer));
           if (r && r.ok) {
-            log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
-            return "";
+            if (pieces.length) log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
+            if (bookings.length) {
+              log("info", { event: "seats_booked", session_id: sess.id, event_id: evt.id, bookings: book });
+              const reply = new Map((Array.isArray(r.booked) ? r.booked : []).map((b) => [b.id, b]));
+              for (const b of bookings) {
+                const e = reply.get(b.id);
+                if (!e) {
+                  log("warn", { event: "seats_book_unconfirmed", session_id: sess.id, event_id: evt.id, id: b.id });
+                  lines.push(`ACTION: add ${b.seats} seats to ${b.id} in the sheet manually (seats_booked)`);
+                } else if (e.overbooked) {
+                  log("warn", { event: "seats_overbooked", session_id: sess.id, event_id: evt.id, id: b.id });
+                  lines.push(`OVERBOOKED ${b.id}: refund this booking or move it`);
+                }
+              }
+            }
+            return lines.join("\n");
           }
           const reason = (r && r.reason) || "unknown";
-          if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces });
-          else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, reason: safeText(reason, 60) });
-          return manualLine(reason);
+          if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book });
+          else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book, reason: safeText(reason, 60) });
+          return manual(reason).join("\n");
         } catch (err) {
           try {
-            if (pieces.length && !localDone) markSoldLocal(pieces);
+            if (!localDone) localEffects();
           } catch (_) {}
-          log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, reason: "error", name: err && err.name });
-          return pieces.length ? `ACTION: mark ${pieces.join(", ")} as sold in the sheet manually` : "";
+          log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book, reason: "error", name: err && err.name });
+          return manual("error").join("\n");
         }
       };
       const logNotConfigured = () => {
@@ -237,8 +274,8 @@ function makeHandler({
       if (!env.OWNER_NOTIFY_WEBHOOK_URL) logNotConfigured();
       let summary = buildOrderSummary(session, lineItems, itemIds, kind);
       if (kind === "paid") {
-        // Stripe retries re-mark harmlessly (the Apps Script just sets sold=true again).
-        const manual = await markPaidPieces(itemIds, session, stripeEvent);
+        // Stripe retries are harmless: the Apps Script sets sold=true again and skips a session/item it already booked.
+        const manual = await recordPaid(itemIds, session, stripeEvent);
         if (manual) summary += `\n${manual}`;
       }
       const delivered = await notify(summary, env, undefined, requestId);
