@@ -7,9 +7,11 @@
 // CATALOGUE_WRITE_URL / CATALOGUE_WRITE_SECRET (optional, see _catalogue-source.js).
 // Paid orders also mark the ordered one-off physical pieces (maxQty 1) as sold in the Google
 // Sheet (tab Vasi) and book the ordered masterclass seats (session metadata `bookings`, "mc1:2,mc3:1")
-// in the tab Masterclass (column seats_booked), in ONE Apps Script call (contract v2: POST
-// {secret, session_id, ids, bookings}, reply {ok, version:2, sheet:"Vasi", marked, booked:[{id, seats,
-// booked_after, total, overbooked, duplicate}]}). Marking problems never change the 200 answer to Stripe:
+// in the tab Masterclass (column seats_booked), in ONE Apps Script call (contract v3: POST
+// {secret, session_id, ids, bookings, customer}, reply {ok, version:3, sheet:"Vasi", marked, booked:[{id, seats,
+// booked_after, total, overbooked, duplicate, calendar:{status, reason?}}]}). The script creates one calendar event
+// per booking and invites the customer (email, name and locale go only into that POST, never into logs or answers);
+// a missing, failed or skipped event becomes an ACTION line for the owner and calendar: "partial" in the 200 answer. Marking problems never change the 200 answer to Stripe:
 // the owner is told to mark by hand. Booked seats also count locally for 15 minutes (per session id, so
 // Stripe retries never count twice), until the published CSV catches up.
 // Idempotency: stateless. Stripe may retry/duplicate deliveries (same event.id);
@@ -196,17 +198,29 @@ function makeHandler({
       // Returns the lines for the owner ("ACTION: ..." / "OVERBOOKED ...", joined by newlines), "" when all
       // went well. Never throws: marking problems must not turn into a non-200 answer to Stripe.
       let sheetOutcome; // shown in Stripe's delivery log: ok | nothing_to_record | failed:<reason>
+      let calendarOutcome = "none"; // ok | partial | none (nothing to book, or no customer email)
       const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
         let localDone = false;
         const bookings = parseBookings(sess.metadata && sess.metadata.bookings);
         const book = bookings.map((b) => `${b.id}:${b.seats}`);
         const lines = [];
+        const cd = sess.customer_details || {};
+        const customer = {};
+        if (cd.email) customer.email = String(cd.email);
+        if (cd.name) customer.name = String(cd.name);
+        const hasCustomer = Boolean(customer.email);
+        if (customer.email || customer.name) customer.locale = ["it", "en", "ru"].includes(sess.locale) ? sess.locale : "it";
+        const calendarLine = (id, reason) => `ACTION: create the calendar event for ${clean(id, 40)} manually (${clean(reason, 60)})`;
         const manual = (why) => {
           const out = [];
           const hint = why === "script_outdated" ? " (Apps Script needs updating)" : "";
           if (pieces.length) out.push(`ACTION: mark ${pieces.join(", ")} as sold in the sheet manually${hint}`);
           for (const b of bookings) out.push(`ACTION: add ${b.seats} seats to ${b.id} in the sheet manually (seats_booked)${hint}`);
+          if (hasCustomer) {
+            calendarOutcome = "partial";
+            for (const b of bookings) out.push(calendarLine(b.id, why === "script_outdated" ? "Apps Script needs updating" : "sheet update failed"));
+          }
           return out;
         };
         const localEffects = () => {
@@ -228,9 +242,10 @@ function makeHandler({
           const deadline = new Promise((resolve) => {
             timer = setTimeout(() => resolve({ ok: false, reason: "deadline" }), MARK_DEADLINE_MS);
           });
-          const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id }), deadline]).finally(() => clearTimeout(timer));
+          const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id, customer }), deadline]).finally(() => clearTimeout(timer));
           if (r && r.ok) {
             sheetOutcome = "ok";
+            if (hasCustomer && bookings.length) calendarOutcome = "ok"; // downgraded to partial below
             if (pieces.length) log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
             if (bookings.length) {
               log("info", { event: "seats_booked", session_id: sess.id, event_id: evt.id, bookings: book });
@@ -240,10 +255,24 @@ function makeHandler({
                 if (!e) {
                   log("warn", { event: "seats_book_unconfirmed", session_id: sess.id, event_id: evt.id, id: b.id });
                   lines.push(`ACTION: add ${b.seats} seats to ${b.id} in the sheet manually (seats_booked)`);
-                } else if (e.overbooked) {
+                  if (hasCustomer) {
+                    calendarOutcome = "partial";
+                    lines.push(calendarLine(b.id, "booking not in the sheet"));
+                  }
+                  continue;
+                }
+                if (e.overbooked) {
                   log("warn", { event: "seats_overbooked", session_id: sess.id, event_id: evt.id, id: b.id });
                   lines.push(`OVERBOOKED ${b.id}: refund this booking or move it`);
                 }
+                if (!hasCustomer) continue; // no invitation without a customer email: nothing to report
+                const c = e.calendar;
+                if (c && (c.status === "created" || c.status === "exists")) continue;
+                calendarOutcome = "partial";
+                // no calendar field = a v2 script that was not updated; ids and reasons only in the log, never email or name
+                const why = c ? c.reason || c.status : "Apps Script needs updating";
+                if (c) log("warn", { event: c.status === "failed" ? "calendar_failed" : "calendar_skipped", session_id: sess.id, event_id: evt.id, id: b.id, reason: safeText(why, 60) });
+                lines.push(calendarLine(b.id, why));
               }
             }
             return lines.join("\n");
@@ -288,7 +317,7 @@ function makeHandler({
       const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
-      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome } : { received: true });
+      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome } : { received: true });
     } catch (err) {
       const out = { event: "webhook_processing_failed", event_id: stripeEvent.id, session_id: session.id, name: err && err.name };
       if (err && err.name === "NotifyFetchError") out.code = err.code; // never the URL

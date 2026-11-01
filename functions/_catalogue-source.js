@@ -641,7 +641,7 @@ function markBookedLocal(bookings, { now = Date.now, sessionId } = {}) {
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // One POST attempt. Resolves {ok:true, marked} or {ok:false, reason, retry}.
-// `v2`: bookings were sent, so the reply must also carry version 2.
+// `v2`: bookings were sent, so the reply must also carry version 2 or later (the script replies 3 since the calendar).
 async function postOnce(url, payload, fetchImpl, timeoutMs, v2) {
   try {
     return await withTimeout(timeoutMs, async (signal) => {
@@ -662,7 +662,7 @@ async function postOnce(url, payload, fetchImpl, timeoutMs, v2) {
       }
       // An ok reply that does not name the Vasi tab (or, with bookings, is not version 2) comes from an old, not yet redeployed script.
       if (body && body.ok === true) {
-        if (body.sheet !== SHEET_NAME || (v2 && body.version !== 2)) return { ok: false, reason: "script_outdated", retry: false };
+        if (body.sheet !== SHEET_NAME || (v2 && !(typeof body.version === "number" && body.version >= 2))) return { ok: false, reason: "script_outdated", retry: false };
         return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked) };
       }
       if (body && typeof body.error === "string" && /^[a-z_]{1,30}$/.test(body.error)) return { ok: false, reason: body.error, retry: false };
@@ -679,15 +679,31 @@ function cleanBooked(list) {
   const num = (v) => (Number.isFinite(v) ? v : null);
   return list
     .filter((b) => b && typeof b === "object" && ID_RE.test(String(b.id)))
-    .map((b) => ({ id: String(b.id), seats: num(b.seats), booked_after: num(b.booked_after), total: num(b.total), overbooked: b.overbooked === true, duplicate: b.duplicate === true }));
+    .map((b) => {
+      const e = { id: String(b.id), seats: num(b.seats), booked_after: num(b.booked_after), total: num(b.total), overbooked: b.overbooked === true, duplicate: b.duplicate === true };
+      const c = cleanCalendar(b.calendar);
+      if (c) e.calendar = c; // absent from a v2 script
+      return e;
+    });
+}
+
+const CAL_STATUSES = ["created", "exists", "skipped", "failed"];
+
+// {status, reason?} of the script's per-booking calendar field; null when absent or malformed.
+function cleanCalendar(c) {
+  if (!c || typeof c !== "object" || !CAL_STATUSES.includes(c.status)) return null;
+  const out = { status: c.status };
+  if (typeof c.reason === "string" && /^[a-z_,]{1,60}$/.test(c.reason)) out.reason = c.reason;
+  return out;
 }
 
 // Marks ids as sold and books masterclass seats ({id, seats} in `bookings`, with the Stripe
-// `sessionId` for idempotency) in the sheet, in ONE call. Never throws. Resolves
+// `sessionId` for idempotency) in the sheet, in ONE call. `customer` ({email, name, locale}) rides along
+// with the bookings only, for the calendar invitation; it is never logged. Never throws. Resolves
 //   {ok:true, marked[, booked]}  |  {ok:false, reason}  (reason "not_configured" when env is unset,
-//   "script_outdated" when an ok reply does not name the Vasi tab or, with bookings, is not version 2)
+//   "script_outdated" when an ok reply does not name the Vasi tab or, with bookings, is older than version 2)
 // Retries (up to 2, short backoff) only on network errors, timeouts, 5xx and non-JSON answers.
-async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, sleep = defaultSleep, timeoutMs = FETCH_TIMEOUT_MS, bookings, sessionId } = {}) {
+async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, sleep = defaultSleep, timeoutMs = FETCH_TIMEOUT_MS, bookings, sessionId, customer } = {}) {
   const secret = env && env.CATALOGUE_WRITE_SECRET;
   const chk = checkUrl(env && env.CATALOGUE_WRITE_URL, WRITE_HOST);
   if (!chk.url || !secret) {
@@ -697,8 +713,10 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
   }
   if (!fetchImpl) return { ok: false, reason: "no_fetch" };
   const book = (bookings || []).filter((b) => b && ID_RE.test(String(b.id)) && Number.isInteger(b.seats) && b.seats >= 1 && b.seats <= MAX_GROUP).map((b) => ({ id: String(b.id), seats: b.seats }));
-  // Contract v2 adds session_id and bookings; with ids only the payload is the one of the first version.
-  const payload = JSON.stringify(book.length ? { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book } : { secret, ids: [...ids] });
+  // Contract v2 adds session_id and bookings (v3 customer); with ids only the payload is the one of the first version.
+  const body = book.length ? { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book } : { secret, ids: [...ids] };
+  if (book.length && customer && (customer.email || customer.name)) body.customer = { email: String(customer.email || ""), name: String(customer.name || ""), locale: ["it", "en", "ru"].includes(customer.locale) ? customer.locale : "it" };
+  const payload = JSON.stringify(body);
   let last = { ok: false, reason: "network" };
   for (let attempt = 0; attempt <= WRITE_RETRIES; attempt++) {
     last = await postOnce(chk.url, payload, fetchImpl, timeoutMs, book.length > 0);

@@ -1,4 +1,4 @@
-// stripe-webhook: masterclass bookings sent to the Apps Script (contract v2), owner lines, local seats.
+// stripe-webhook: masterclass bookings sent to the Apps Script (contract v3), owner lines, calendar outcome, local seats.
 // Fake Stripe, fake Apps Script fetch, no network.
 const test = require("node:test");
 const assert = require("node:assert");
@@ -61,14 +61,15 @@ async function run(obj, { reply, type, overrides = {} } = {}) {
   }
   return { res, posts, sent, cap };
 }
-const ok = (booked, marked = []) => ({ ok: true, version: 2, sheet: "Vasi", marked, booked });
-const entry = (id, seats, o = {}) => ({ id, seats, booked_after: seats, total: 8, overbooked: false, duplicate: false, ...o });
+const ok = (booked, marked = []) => ({ ok: true, version: 3, sheet: "Vasi", marked, booked });
+const entry = (id, seats, o = {}) => ({ id, seats, booked_after: seats, total: 8, overbooked: false, duplicate: false, calendar: { status: "created" }, ...o });
+const CUSTOMER = { email: "a@b.it", name: "Ann", locale: "it" };
 
 test("paid order: ONE combined call {secret, session_id, ids, bookings}; owner sees persons", async () => {
   const { res, posts, sent, cap } = await run(session({ item_ids: "v3,mc1,mc3", bookings: "mc1:2,mc3:1" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)], ["v3"]) });
   assert.equal(res.statusCode, 200);
   assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0].body, { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc3", seats: 1 }] });
+  assert.deepEqual(posts[0].body, { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc3", seats: 1 }], customer: CUSTOMER });
   assert.ok(sent[0].startsWith("New paid order"));
   assert.ok(sent[0].includes("Masterclass persons: mc1 x 2; mc3 x 1"));
   assert.ok(sent[0].includes("1 x Corso (2 persone)"));
@@ -79,7 +80,7 @@ test("paid order: ONE combined call {secret, session_id, ids, bookings}; owner s
 
 test("bookings only (no vase): ids is empty, still one call", async () => {
   const { posts, sent } = await run(session({ item_ids: "mc1", bookings: "mc1:8" }), { reply: ok([entry("mc1", 8)]) });
-  assert.deepEqual(posts.map((p) => p.body), [{ secret: SECRET, session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 8 }] }]);
+  assert.deepEqual(posts.map((p) => p.body), [{ secret: SECRET, session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 8 }], customer: CUSTOMER }]);
   assert.ok(!sent[0].includes("ACTION"));
 });
 
@@ -187,12 +188,68 @@ test("buildOrderSummary shows the persons per masterclass, from metadata or expl
 
 test("the 200 answer to Stripe carries the sheet outcome (visible in Stripe's delivery log), never a secret", async () => {
   const good = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: ok([entry("mc1", 2)], ["v3"]) });
-  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok" });
+  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok", calendar: "ok" });
   const old = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
   assert.equal(JSON.parse(old.res.body).sheet, "failed:script_outdated");
   const denied = await run(session({ item_ids: "v3" }), { reply: { ok: false, error: "forbidden" } });
   assert.match(JSON.parse(denied.res.body).sheet, /^failed:/);
   assert.ok(!denied.res.body.includes(SECRET) && !denied.res.body.includes("AKFY123"));
   const nothing = await run(session({ item_ids: "" }), { reply: ok([]) });
-  assert.deepEqual(JSON.parse(nothing.res.body), { received: true, sheet: "nothing_to_record" });
+  assert.deepEqual(JSON.parse(nothing.res.body), { received: true, sheet: "nothing_to_record", calendar: "none" });
+});
+
+// ---- calendar (contract v3) ----
+const cal = (status, reason) => ({ status, ...(reason ? { reason } : {}) });
+const bk = { item_ids: "mc1,mc3", bookings: "mc1:2,mc3:1" };
+
+test("customer {email, name, locale} rides in the same single POST; locale from the session, it by default; omitted without email and name", async () => {
+  let x = await run(session(bk, { locale: "ru" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
+  assert.equal(x.posts.length, 1);
+  assert.deepEqual(x.posts[0].body.customer, { email: "a@b.it", name: "Ann", locale: "ru" });
+  x = await run(session(bk, { locale: "de" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
+  assert.equal(x.posts[0].body.customer.locale, "it");
+  x = await run(session(bk, { customer_details: { address: { country: "IT" } } }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
+  assert.ok(!("customer" in x.posts[0].body));
+  assert.equal(JSON.parse(x.res.body).calendar, "none", "no customer email: nothing to invite");
+  assert.ok(!x.sent[0].includes("calendar event"));
+});
+
+test("calendar failed or skipped (or an older script without calendar) gives an ACTION line, partial answer and PII-free logs", async () => {
+  const x = await run(session(bk), { reply: ok([entry("mc1", 2, { calendar: cal("failed", "calendar_error") }), entry("mc3", 1, { calendar: cal("skipped", "date_in_past") })]) });
+  assert.equal(x.res.statusCode, 200);
+  assert.equal(JSON.parse(x.res.body).calendar, "partial");
+  assert.ok(x.sent[0].includes("ACTION: create the calendar event for mc1 manually (calendar_error)"));
+  assert.ok(x.sent[0].includes("ACTION: create the calendar event for mc3 manually (date_in_past)"));
+  const f = events(x.cap, "calendar_failed");
+  const sk = events(x.cap, "calendar_skipped");
+  assert.deepEqual([f[0][1].id, f[0][1].reason, sk[0][1].id, sk[0][1].reason], ["mc1", "calendar_error", "mc3", "date_in_past"]);
+  const old = await run(session(bk), { reply: { ok: true, version: 2, sheet: "Vasi", marked: [], booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false }, { id: "mc3", seats: 1, booked_after: 1, total: 8, overbooked: false, duplicate: false }] } });
+  assert.equal(old.res.statusCode, 200);
+  assert.equal(JSON.parse(old.res.body).sheet, "ok", "a v2 script still counts as ok for the seats");
+  assert.equal(JSON.parse(old.res.body).calendar, "partial");
+  assert.ok(old.sent[0].includes("ACTION: create the calendar event for mc1 manually (Apps Script needs updating)"));
+  assert.ok(!old.sent[0].includes("add 2 seats"));
+});
+
+test("calendar created or exists is fine, a created note (owner guest missing) is not an action; partial only when one is missing", async () => {
+  let x = await run(session(bk), { reply: ok([entry("mc1", 2, { duplicate: true, calendar: cal("exists") }), entry("mc3", 1, { calendar: cal("created", "owner_guest_missing") })]) });
+  assert.equal(JSON.parse(x.res.body).calendar, "ok");
+  assert.ok(!x.sent[0].includes("ACTION"));
+  x = await run(session(bk), { reply: ok([entry("mc1", 2)]) }); // mc3 not reported
+  assert.equal(JSON.parse(x.res.body).calendar, "partial");
+});
+
+test("sheet call failed: owner is told to create the events too; calendar partial", async () => {
+  const x = await run(session(bk), { reply: new Error("boom") });
+  assert.equal(JSON.parse(x.res.body).calendar, "partial");
+  assert.ok(x.sent[0].includes("ACTION: create the calendar event for mc1 manually (sheet update failed)"));
+});
+
+test("webhook never logs or answers the customer's email or name; the summary shows no more than before", async () => {
+  const x = await run(session(bk), { reply: ok([entry("mc1", 2, { calendar: cal("failed", "calendar_error") }), entry("mc3", 1)]) });
+  const seen = x.cap.logs.map(([, l]) => l).join("\n") + x.res.body;
+  assert.ok(!seen.includes("a@b.it") && !seen.includes("Ann"));
+  const lines = x.sent[0].split("\n");
+  assert.equal(lines.filter((l) => l.includes("a@b.it")).length, 1, "only the existing Customer line");
+  assert.ok(!lines.some((l) => l.startsWith("ACTION") && (l.includes("a@b.it") || l.includes("Ann"))));
 });

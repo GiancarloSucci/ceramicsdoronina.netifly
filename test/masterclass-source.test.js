@@ -220,6 +220,21 @@ test("markSold with bookings sends session_id and bookings and returns the clean
   });
 });
 
+test("markSold sends the customer with bookings only, accepts reply version 2 and 3, and keeps the calendar field of each booking", async () => {
+  const cust = { email: "a@b.it", name: "Ann", locale: "xx" };
+  const calls = [];
+  const body = { ok: true, version: 3, sheet: "Vasi", marked: [], booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false, calendar: { status: "failed", reason: "calendar_error", extra: 1 } }, { id: "mc2", calendar: { status: "weird" } }, { id: "mc3", calendar: { status: "skipped", reason: "Bad <b>" } }] };
+  const r = await src.markSold([], { fetchImpl: reply(body, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }], sessionId: "cs_1", customer: cust });
+  assert.deepEqual(calls[0].customer, { email: "a@b.it", name: "Ann", locale: "it" });
+  assert.equal(r.ok, true, "version 3 accepted");
+  assert.deepEqual(r.booked.map((b) => b.calendar), [{ status: "failed", reason: "calendar_error" }, undefined, { status: "skipped" }]);
+  const v2 = await src.markSold([], { fetchImpl: reply({ ...body, version: 2 }, []), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }], sessionId: "cs_1" });
+  assert.equal(v2.ok, true, "a v2 script still counts as ok");
+  const vase = [];
+  await src.markSold(["v1"], { fetchImpl: reply({ ok: true, sheet: "Vasi", marked: ["v1"] }, vase), env: WENV, sleep: nosleep, customer: cust });
+  assert.ok(!("customer" in vase[0]), "no customer without bookings");
+});
+
 test("markSold: with bookings an ok reply needs version 2 and sheet Vasi (script_outdated otherwise); ids only keep the old rule", async () => {
   for (const b of [{ ok: true, sheet: "Vasi", marked: [] }, { ok: true, version: 1, sheet: "Vasi" }, { ok: true, version: "2", sheet: "Vasi" }, { ok: true, version: 2 }]) {
     const calls = [];
