@@ -215,7 +215,7 @@ test("markSold with bookings sends session_id and bookings and returns the clean
   const r = await src.markSold(["v1"], { fetchImpl: reply(body, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 9 }, { id: "x y", seats: 1 }], sessionId: "cs_1" });
   assert.deepEqual(calls, [{ secret: "S3CRET-VALUE", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc1", seats: 2 }] }]);
   assert.deepEqual(r, {
-    ok: true, marked: ["v1"],
+    ok: true, marked: ["v1"], version: 2,
     booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: true }, { id: "mc2", seats: null, booked_after: null, total: null, overbooked: false, duplicate: false }],
   });
 });
@@ -243,5 +243,5 @@ test("markSold: with bookings an ok reply needs version 2 and sheet Vasi (script
     assert.equal(calls.length, 1, "no retry on an outdated script");
   }
   const old = await src.markSold(["v1"], { fetchImpl: reply({ ok: true, sheet: "Vasi", marked: ["v1"] }, []), env: WENV, sleep: nosleep });
-  assert.deepEqual(old, { ok: true, marked: ["v1"] });
+  assert.deepEqual(old, { ok: true, marked: ["v1"], version: 1 });
 });

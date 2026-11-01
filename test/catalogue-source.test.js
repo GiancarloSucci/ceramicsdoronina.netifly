@@ -272,7 +272,7 @@ const nosleep = async () => {};
 test("markSold: POSTs {secret, ids} with redirect follow and accepts ok:true JSON", async () => {
   const f = fakeFetch(jsonRes({ ok: true, marked: ["v3"], sheet: "Vasi" }));
   const r = await src.markSold(["v3"], { fetchImpl: f, env: wenv, sleep: nosleep });
-  assert.deepEqual(r, { ok: true, marked: ["v3"] });
+  assert.deepEqual(r, { ok: true, marked: ["v3"], version: 1 });
   assert.equal(f.calls.length, 1);
   const { url, opts } = f.calls[0];
   assert.equal(url, WURL);

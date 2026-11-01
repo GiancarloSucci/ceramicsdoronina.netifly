@@ -663,7 +663,7 @@ async function postOnce(url, payload, fetchImpl, timeoutMs, v2) {
       // An ok reply that does not name the Vasi tab (or, with bookings, is not version 2) comes from an old, not yet redeployed script.
       if (body && body.ok === true) {
         if (body.sheet !== SHEET_NAME || (v2 && !(typeof body.version === "number" && body.version >= 2))) return { ok: false, reason: "script_outdated", retry: false };
-        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked) };
+        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked), version: typeof body.version === "number" ? body.version : 1 };
       }
       if (body && typeof body.error === "string" && /^[a-z_]{1,30}$/.test(body.error)) return { ok: false, reason: body.error, retry: false };
       return { ok: false, reason: res.ok ? "rejected" : "http_" + res.status, retry: !res.ok && res.status >= 500 };
@@ -724,7 +724,7 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
     if (attempt < WRITE_RETRIES) await sleep(WRITE_BACKOFF_MS * (attempt + 1));
   }
   if (!last.ok) return { ok: false, reason: last.reason };
-  return book.length ? { ok: true, marked: last.marked, booked: last.booked } : { ok: true, marked: last.marked };
+  return book.length ? { ok: true, marked: last.marked, booked: last.booked, version: last.version } : { ok: true, marked: last.marked, version: last.version };
 }
 
 module.exports = {

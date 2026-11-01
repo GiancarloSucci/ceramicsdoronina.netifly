@@ -395,7 +395,7 @@ test("markSold: success needs ok === true AND sheet === 'Vasi'; an ok reply with
     assert.equal(n, 1);
   }
   const ok = await src.markSold(["v3"], { fetchImpl: async () => jsonRes({ ok: true, marked: ["v3"], sheet: "Vasi" }), env: wenv, sleep: async () => {} });
-  assert.deepEqual(ok, { ok: true, marked: ["v3"] });
+  assert.deepEqual(ok, { ok: true, marked: ["v3"], version: 1 });
   const err = await src.markSold(["v3"], { fetchImpl: async () => jsonRes({ ok: false, error: "bad_sheet" }), env: wenv, sleep: async () => {} });
   assert.deepEqual(err, { ok: false, reason: "bad_sheet" });
 });

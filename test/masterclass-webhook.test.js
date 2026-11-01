@@ -188,7 +188,7 @@ test("buildOrderSummary shows the persons per masterclass, from metadata or expl
 
 test("the 200 answer to Stripe carries the sheet outcome (visible in Stripe's delivery log), never a secret", async () => {
   const good = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: ok([entry("mc1", 2)], ["v3"]) });
-  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok", calendar: "ok" });
+  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok", calendar: "ok", script_version: 3 });
   const old = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
   assert.equal(JSON.parse(old.res.body).sheet, "failed:script_outdated");
   const denied = await run(session({ item_ids: "v3" }), { reply: { ok: false, error: "forbidden" } });
@@ -263,8 +263,9 @@ test("a booking without a calendar event is explained in the 200 answer (id:reas
   assert.ok(!a.res.body.includes("a@b.it") && !a.res.body.includes("Ann"));
   const created = { ...ok([{ ...entry("mc1", 2), calendar: { status: "created" } }]), version: 3 };
   const b = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: created });
-  assert.deepEqual(JSON.parse(b.res.body), { received: true, sheet: "ok", calendar: "ok" });
+  assert.deepEqual(JSON.parse(b.res.body), { received: true, sheet: "ok", calendar: "ok", script_version: 3 });
   const v2 = { ...ok([{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false }]), version: 2 }; // an older script: no calendar field
   const old = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: v2 });
   assert.deepEqual(JSON.parse(old.res.body).calendar_issues, ["mc1:Apps Script needs updating"]);
+  assert.equal(JSON.parse(old.res.body).script_version, 2, "the answer names the script version that replied");
 });
