@@ -343,7 +343,7 @@ function parseCatalogueCsv(text) {
 // (seats: true for the seat schema of the Masterclass tab).
 // `row` holds only the whitelisted headers present in the sheet, values as in the sheet (BOM and
 // CR stripped). Throws SheetError when the tab as a whole must not be trusted: missing required
-// column, duplicate id inside the tab, zero valid rows or more than half of the rows invalid.
+// column, zero valid rows or more than half of the rows invalid (a repeated id only drops the later row).
 function parseTabCsv(key, text) {
   const tab = TABS[key];
   let rows;
@@ -379,7 +379,12 @@ function parseTabCsv(key, text) {
     for (const h of headers) obj[h] = String(cells[idx[h]] || "").replace(/\r/g, "");
     const id = obj.id.trim();
     if (id) {
-      if (seen.has(id)) throw new SheetError("duplicate_id");
+      if (seen.has(id)) {
+        // A repeated id (e.g. a copied row whose id was not changed) drops only the LATER row: the first one keeps
+        // selling and the other tabs/rows are unaffected. The id shows up in catalogue_rows_dropped.
+        dropped.push(id);
+        continue;
+      }
       seen.add(id);
     }
     const v = validateTabRow(key, obj, seats);

@@ -157,14 +157,18 @@ test("row validation: ids, prices, images, maxQty; invalid rows dropped with ids
   assert.deepEqual(mc.dropped, ["m2", "m3"]);
 });
 
-test("tab-level rejection: missing column, zero valid rows, >50% invalid rows, duplicate id inside the tab", () => {
+test("tab-level rejection: missing column, zero valid rows, >50% invalid rows, repeated id inside the tab only drops the later row", () => {
   assert.throws(() => src.parseTabCsv("vasi", "id,name_it\nv1,x"), { reason: "missing_column_name_en" });
   assert.throws(() => src.parseTabCsv("vasi", ""), { reason: "csv_empty" });
   assert.throws(() => src.parseTabCsv("vasi", MIN.vasi + "\n"), { reason: "no_valid_rows" });
   assert.throws(() => src.parseTabCsv("vasi", mini("vasi", ["Bad", "a.jpg", "", "1"])), { reason: "no_valid_rows" });
   assert.throws(() => src.parseTabCsv("vasi", mini("vasi", ["a", "a.jpg", "", "1"], ["B", "a.jpg", "", "1"], ["C", "a.jpg", "", "1"])), { reason: "too_many_invalid_rows" });
   assert.ok(src.parseTabCsv("vasi", mini("vasi", ["a", "a.jpg", "", "1"], ["B", "a.jpg", "", "1"])), "exactly half is tolerated");
-  assert.throws(() => src.parseTabCsv("vasi", mini("vasi", ["a", "a.jpg", "", "1"], ["a", "a.jpg", "", "2"])), { reason: "duplicate_id" });
+  // a repeated id drops only the later row (the earlier one keeps selling), the tab stays usable
+  const dup = src.parseTabCsv("vasi", mini("vasi", ["a", "a.jpg", "", "1"], ["b", "b.jpg", "", "1"], ["a", "a.jpg", "", "2"]));
+  assert.deepEqual(Object.keys(dup.items).sort(), ["a", "b"]);
+  assert.deepEqual(dup.dropped, ["a"]);
+  assert.equal(dup.items.a.priceCents, 100, "the first row wins");
 });
 
 test("exposure whitelist: extra columns and shopify_variant_id never leave; values untrimmed, CR stripped", async () => {
@@ -255,12 +259,11 @@ test("per tab failure: fetch error -> that tab from the snapshot (tab null), the
   assert.equal(r2.items["gc-50"].priceCents, 5000);
 });
 
-test("per tab: HTTP error, invalid tab (zero valid rows, >50% invalid, in-tab duplicate), oversize, timeout all fall back", async () => {
+test("per tab: HTTP error, invalid tab (zero valid rows, >50% invalid), oversize, timeout all fall back", async () => {
   const cases = {
     http: new Response("x", { status: 503 }),
     zero: MIN.vasi + "\n",
     many: mini("vasi", ["a", "a.jpg", "", "1"], ["B", "a.jpg", "", "1"], ["C", "a.jpg", "", "1"]),
-    dup: mini("vasi", ["a", "a.jpg", "", "1"], ["a", "a.jpg", "", "1"]),
     big: "x".repeat(src.MAX_CSV_BYTES + 1),
     hang: (opts) => new Promise((_, rej) => opts.signal.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" })))),
   };
