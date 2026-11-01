@@ -4,10 +4,10 @@
 //    sources:{vasi,masterclass,certificati},
 //    items:[{id,type,name_it,name_en,name_ru,priceCents,image,maxQty,sold}],   (as in version 1)
 //    tabs:{vasi,masterclass,certificati}}   each {headers:[...], rows:[{header: value}]} or null
-// Masterclass items add tiersCents (total cents of a booking of 1..8 persons, null = not bookable),
-// seatsTotal, seatsBooked, seatsFree; maxQty is then the largest bookable group. Masterclass rows
+// Masterclass items add tiersCents (total cents of a booking of 1..20 persons, null = not bookable),
+// seatsTotal, seatsBooked, seatsFree (seatsTotal and seatsFree are null = unlimited seats); maxQty is then the largest bookable group. Masterclass rows
 // (seat schema) carry the effective seats_booked (sheet + paid bookings the CSV does not show yet)
-// and one COMPUTED field, seats_free (the only field not taken from the sheet).
+// and one COMPUTED field, seats_free ("" = unlimited; the only field not taken from the sheet).
 // tabs hold the whitelisted display columns of the sheet tabs (never shopify_variant_id or notes);
 // null (tab served from the snapshot) tells the site to use its own ODS files.
 // Same data create-checkout charges from (see _catalogue-source.js), so the shop page

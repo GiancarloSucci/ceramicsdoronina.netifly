@@ -9,11 +9,11 @@ const { makeHandler } = require("../functions/catalogue.js");
 const { makeHandler: makeWebhook } = require("../functions/stripe-webhook.js");
 const snapshotRaw = require("../functions/catalogue.json");
 // The snapshot as the functions serve it: masterclass items (digital, images/masterclass/) also carry the
-// linear seat fields (tiers 1..min(8,maxQty) x price, null above; nothing booked), derived here independently.
+// linear seat fields (tiers 1..min(20,maxQty) x price, null above; nothing booked), derived here independently.
 const snapshot = Object.fromEntries(
   Object.entries(snapshotRaw).map(([id, p]) => {
     if (!(p.type === "digital" && p.image.startsWith("images/masterclass/"))) return [id, p];
-    const tiersCents = Array.from({ length: 8 }, (_, i) => (i < p.maxQty ? p.priceCents * (i + 1) : null));
+    const tiersCents = Array.from({ length: 20 }, (_, i) => (i < p.maxQty ? p.priceCents * (i + 1) : null));
     return [id, { ...p, tiersCents, seatsTotal: p.maxQty, seatsBooked: 0, seatsFree: p.maxQty }];
   })
 );
