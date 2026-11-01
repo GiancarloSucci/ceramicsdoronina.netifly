@@ -184,3 +184,15 @@ test("buildOrderSummary shows the persons per masterclass, from metadata or expl
   assert.ok(buildOrderSummary(session({}), [], "", "paid", [{ id: "mc9", seats: 4 }]).includes("Masterclass persons: mc9 x 4"));
   assert.ok(!buildOrderSummary(session({ item_ids: "v3" }), [], "v3").includes("Masterclass persons"));
 });
+
+test("the 200 answer to Stripe carries the sheet outcome (visible in Stripe's delivery log), never a secret", async () => {
+  const good = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: ok([entry("mc1", 2)], ["v3"]) });
+  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok" });
+  const old = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
+  assert.equal(JSON.parse(old.res.body).sheet, "failed:script_outdated");
+  const denied = await run(session({ item_ids: "v3" }), { reply: { ok: false, error: "forbidden" } });
+  assert.match(JSON.parse(denied.res.body).sheet, /^failed:/);
+  assert.ok(!denied.res.body.includes(SECRET) && !denied.res.body.includes("AKFY123"));
+  const nothing = await run(session({ item_ids: "" }), { reply: ok([]) });
+  assert.deepEqual(JSON.parse(nothing.res.body), { received: true, sheet: "nothing_to_record" });
+});

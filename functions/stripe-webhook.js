@@ -195,6 +195,7 @@ function makeHandler({
       // Marks the ordered unique pieces as sold and books the masterclass seats (one Apps Script call).
       // Returns the lines for the owner ("ACTION: ..." / "OVERBOOKED ...", joined by newlines), "" when all
       // went well. Never throws: marking problems must not turn into a non-200 answer to Stripe.
+      let sheetOutcome; // shown in Stripe's delivery log: ok | nothing_to_record | failed:<reason>
       const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
         let localDone = false;
@@ -218,7 +219,10 @@ function makeHandler({
             const { items } = await getCatalogue({ fetchImpl, env });
             pieces = uniquePieceIds(ids, items);
           }
-          if (!pieces.length && !bookings.length) return "";
+          if (!pieces.length && !bookings.length) {
+            sheetOutcome = "nothing_to_record";
+            return "";
+          }
           localEffects();
           let timer;
           const deadline = new Promise((resolve) => {
@@ -226,6 +230,7 @@ function makeHandler({
           });
           const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id }), deadline]).finally(() => clearTimeout(timer));
           if (r && r.ok) {
+            sheetOutcome = "ok";
             if (pieces.length) log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
             if (bookings.length) {
               log("info", { event: "seats_booked", session_id: sess.id, event_id: evt.id, bookings: book });
@@ -244,6 +249,7 @@ function makeHandler({
             return lines.join("\n");
           }
           const reason = (r && r.reason) || "unknown";
+          sheetOutcome = `failed:${safeText(reason, 40)}`;
           if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book });
           else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book, reason: safeText(reason, 60) });
           return manual(reason).join("\n");
@@ -251,6 +257,7 @@ function makeHandler({
           try {
             if (!localDone) localEffects();
           } catch (_) {}
+          sheetOutcome = "failed:error";
           log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book, reason: "error", name: err && err.name });
           return manual("error").join("\n");
         }
@@ -281,7 +288,7 @@ function makeHandler({
       const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
-      return res(200, { received: true });
+      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome } : { received: true });
     } catch (err) {
       const out = { event: "webhook_processing_failed", event_id: stripeEvent.id, session_id: session.id, name: err && err.name };
       if (err && err.name === "NotifyFetchError") out.code = err.code; // never the URL
