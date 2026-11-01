@@ -253,3 +253,18 @@ test("webhook never logs or answers the customer's email or name; the summary sh
   assert.equal(lines.filter((l) => l.includes("a@b.it")).length, 1, "only the existing Customer line");
   assert.ok(!lines.some((l) => l.startsWith("ACTION") && (l.includes("a@b.it") || l.includes("Ann"))));
 });
+
+test("a booking without a calendar event is explained in the 200 answer (id:reason only, no email or name)", async () => {
+  const skipped = { ...ok([{ ...entry("mc1", 2), calendar: { status: "skipped", reason: "date_in_past" } }]), version: 3 };
+  const a = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: skipped });
+  const body = JSON.parse(a.res.body);
+  assert.equal(body.calendar, "partial");
+  assert.deepEqual(body.calendar_issues, ["mc1:date_in_past"]);
+  assert.ok(!a.res.body.includes("a@b.it") && !a.res.body.includes("Ann"));
+  const created = { ...ok([{ ...entry("mc1", 2), calendar: { status: "created" } }]), version: 3 };
+  const b = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: created });
+  assert.deepEqual(JSON.parse(b.res.body), { received: true, sheet: "ok", calendar: "ok" });
+  const v2 = { ...ok([{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false }]), version: 2 }; // an older script: no calendar field
+  const old = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: v2 });
+  assert.deepEqual(JSON.parse(old.res.body).calendar_issues, ["mc1:Apps Script needs updating"]);
+});

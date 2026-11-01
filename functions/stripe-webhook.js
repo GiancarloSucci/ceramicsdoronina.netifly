@@ -199,6 +199,7 @@ function makeHandler({
       // went well. Never throws: marking problems must not turn into a non-200 answer to Stripe.
       let sheetOutcome; // shown in Stripe's delivery log: ok | nothing_to_record | failed:<reason>
       let calendarOutcome = "none"; // ok | partial | none (nothing to book, or no customer email)
+      const calendarIssues = []; // "<id>:<reason>" per booking without an event, shown in Stripe's delivery log (ids and fixed reasons only)
       const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
         let localDone = false;
@@ -211,7 +212,10 @@ function makeHandler({
         if (cd.name) customer.name = String(cd.name);
         const hasCustomer = Boolean(customer.email);
         if (customer.email || customer.name) customer.locale = ["it", "en", "ru"].includes(sess.locale) ? sess.locale : "it";
-        const calendarLine = (id, reason) => `ACTION: create the calendar event for ${clean(id, 40)} manually (${clean(reason, 60)})`;
+        const calendarLine = (id, reason) => {
+          calendarIssues.push(`${clean(id, 40)}:${clean(reason, 60)}`);
+          return `ACTION: create the calendar event for ${clean(id, 40)} manually (${clean(reason, 60)})`;
+        };
         const manual = (why) => {
           const out = [];
           const hint = why === "script_outdated" ? " (Apps Script needs updating)" : "";
@@ -317,7 +321,7 @@ function makeHandler({
       const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
-      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome } : { received: true });
+      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome, ...(calendarIssues.length ? { calendar_issues: calendarIssues } : {}) } : { received: true });
     } catch (err) {
       const out = { event: "webhook_processing_failed", event_id: stripeEvent.id, session_id: session.id, name: err && err.name };
       if (err && err.name === "NotifyFetchError") out.code = err.code; // never the URL
