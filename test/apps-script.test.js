@@ -77,7 +77,7 @@ test("marks vases and books seats in one call (v2 reply)", () => {
   const s = fresh();
   const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 2 }, { id: "nope", seats: 1 }] });
   assert.deepEqual(r, {
-    ok: true, version: 7, sheet: "Vasi", marked: ["v3"],
+    ok: true, version: 8, sheet: "Vasi", marked: ["v3"],
     booked: [
       { id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false, calendar: SKIP }, // blank seats_booked = 0
       { id: "mc2", seats: 2, booked_after: 5, total: 4, overbooked: true, duplicate: false, calendar: SKIP }, // recorded anyway
@@ -115,7 +115,7 @@ test("blank seats_total (or no column) means unlimited: total null, never overbo
   const text = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", "many", 5]] };
   assert.deepEqual([script(text)({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1 }] }).booked[0].total], [null], "non-numeric cell: unknown");
   const v = script(fresh())({ secret: "S", ids: ["v1"] });
-  assert.deepEqual(v, { ok: true, version: 7, sheet: "Vasi", marked: ["v1"], booked: [] });
+  assert.deepEqual(v, { ok: true, version: 8, sheet: "Vasi", marked: ["v1"], booked: [] });
 });
 
 test("limited seats_total above 8 and seats 20 work; seats 21 is rejected", () => {
@@ -344,5 +344,5 @@ test("calendar: no customer data in Ordini or in the reply", () => {
 
 test("doGet names the deployed contract version and nothing else (no secret, no sheet data)", () => {
   const r = script(fresh(), "TOPSECRET").get();
-  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 7 });
+  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 8 });
 });

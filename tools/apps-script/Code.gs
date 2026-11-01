@@ -38,7 +38,7 @@ var MAX_NAME = 100;
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
 var MAX_SEATS = 20;
-var VERSION = 7; // Version
+var VERSION = 8; // Version
 
 function doPost(e) {
   var body;
