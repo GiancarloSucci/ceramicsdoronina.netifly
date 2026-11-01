@@ -199,3 +199,34 @@ test("a seat-schema tab that is invalid falls back to the snapshot like any tab"
   assert.ok(logs.some((l) => l.includes("catalogue_fetch_failed") && l.includes("missing_column_name_en")));
   assert.ok(!logs.join("").includes("TOKMC"));
 });
+
+// ---- markSold with bookings (contract v2) ------------------------------------
+
+const WENV = { CATALOGUE_WRITE_URL: "https://script.google.com/macros/s/AKFY123/exec", CATALOGUE_WRITE_SECRET: "S3CRET-VALUE" };
+const reply = (body, calls) => async (url, o) => {
+  calls.push(JSON.parse(o.body));
+  return new Response(JSON.stringify(body), { status: 200 });
+};
+const nosleep = async () => {};
+
+test("markSold with bookings sends session_id and bookings and returns the cleaned booked list", async () => {
+  const calls = [];
+  const body = { ok: true, version: 2, sheet: "Vasi", marked: ["v1"], booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: true, extra: "x" }, { id: "BAD ID" }, null, { id: "mc2", seats: "2", overbooked: "yes" }] };
+  const r = await src.markSold(["v1"], { fetchImpl: reply(body, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 9 }, { id: "x y", seats: 1 }], sessionId: "cs_1" });
+  assert.deepEqual(calls, [{ secret: "S3CRET-VALUE", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc1", seats: 2 }] }]);
+  assert.deepEqual(r, {
+    ok: true, marked: ["v1"],
+    booked: [{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: true }, { id: "mc2", seats: null, booked_after: null, total: null, overbooked: false, duplicate: false }],
+  });
+});
+
+test("markSold: with bookings an ok reply needs version 2 and sheet Vasi (script_outdated otherwise); ids only keep the old rule", async () => {
+  for (const b of [{ ok: true, sheet: "Vasi", marked: [] }, { ok: true, version: 1, sheet: "Vasi" }, { ok: true, version: "2", sheet: "Vasi" }, { ok: true, version: 2 }]) {
+    const calls = [];
+    const r = await src.markSold(["v1"], { fetchImpl: reply(b, calls), env: WENV, sleep: nosleep, bookings: [{ id: "mc1", seats: 1 }], sessionId: "cs_1" });
+    assert.deepEqual(r, { ok: false, reason: "script_outdated" }, JSON.stringify(b));
+    assert.equal(calls.length, 1, "no retry on an outdated script");
+  }
+  const old = await src.markSold(["v1"], { fetchImpl: reply({ ok: true, sheet: "Vasi", marked: ["v1"] }, []), env: WENV, sleep: nosleep });
+  assert.deepEqual(old, { ok: true, marked: ["v1"] });
+});
