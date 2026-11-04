@@ -49,13 +49,13 @@ test("language: ?lang wins, then navigator.language, then Italian; document lang
 });
 
 test("back link: stripe-success.html with the id only when it matches /^cs_[A-Za-z0-9_]+$/, otherwise the site home", () => {
-  assert.equal(render("?lang=it&session_id=cs_test_a1B2c3").back, "https://ceramicsdoronina.it/stripe-success.html?session_id=cs_test_a1B2c3");
+  assert.equal(render("?lang=it&session_id=cs_test_a1B2c3").back, "https://ceramicsdoronina.it/stripe-success.html?from=confirm&session_id=cs_test_a1B2c3");
   for (const bad of ["", "?session_id=", "?session_id=abc", "?session_id=cs_", "?session_id=cs_a-b", "?session_id=cs_a%20b", "?session_id=cs_a&session_id=x%22%3E", "?session_id=%3Cscript%3E", "?session_id=cs_a/../x", "?session_id=cs_a%0Ab", "?session_id=cs_a?x=1", "?session_id=cs_a%26b"]) {
     const href = render(bad).back;
-    assert.ok(href === "https://ceramicsdoronina.it/" || /^https:\/\/ceramicsdoronina\.it\/stripe-success\.html\?session_id=cs_[A-Za-z0-9_]+$/.test(href), `${bad} -> ${href}`);
+    assert.ok(href === "https://ceramicsdoronina.it/" || /^https:\/\/ceramicsdoronina\.it\/stripe-success\.html\?from=confirm&session_id=cs_[A-Za-z0-9_]+$/.test(href), `${bad} -> ${href}`);
   }
   assert.equal(render("?session_id=javascript:alert(1)").back, "https://ceramicsdoronina.it/");
-  assert.equal(render("?session_id=cs_ok&session_id=bad").back, "https://ceramicsdoronina.it/stripe-success.html?session_id=cs_ok", "the first value is the one used");
+  assert.equal(render("?session_id=cs_ok&session_id=bad").back, "https://ceramicsdoronina.it/stripe-success.html?from=confirm&session_id=cs_ok", "the first value is the one used");
 });
 
 test("the session id and other query values are never printed on the page", () => {

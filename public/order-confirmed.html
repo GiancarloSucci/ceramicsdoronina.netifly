@@ -50,7 +50,7 @@
       back.textContent = t.back;
       // The site page clears the cart; it gets the Checkout session id only when it has the expected shape. The id is never shown here.
       var id = params.get("session_id");
-      back.href = id && /^cs_[A-Za-z0-9_]+$/.test(id) ? SITE + "stripe-success.html?session_id=" + id : SITE;
+      back.href = id && /^cs_[A-Za-z0-9_]+$/.test(id) ? SITE + "stripe-success.html?from=confirm&session_id=" + id : SITE;
     })();
   </script>
 </body>
