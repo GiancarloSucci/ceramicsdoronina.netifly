@@ -37,12 +37,13 @@ const ALLOWED_COUNTRIES = [
 ];
 
 const LOCALES = ["it", "en", "ru"];
-const DEFAULT_PRIVACY_VERSION = "2026-11";
-// Shown under the pay button of the Stripe page (custom_text.submit.message, <= 500 chars): plain URL, no markdown.
+const DEFAULT_PRIVACY_VERSION = "2026-11-04";
+// Shown under the pay button of the Stripe page (custom_text.submit.message, <= 500 chars): plain URL, no markdown. Only says that
+// paying confirms the privacy notice was read; the consents themselves are chosen on the site before checkout.
 const PRIVACY_TEXT = {
-  it: (url) => `Procedendo con il pagamento accetti il trattamento dei tuoi dati personali secondo l'informativa privacy: ${url}`,
-  en: (url) => `By proceeding with the payment you accept the processing of your personal data as described in the privacy notice: ${url}`,
-  ru: (url) => `Продолжая оплату, вы соглашаетесь на обработку ваших персональных данных в соответствии с политикой конфиденциальности: ${url}`,
+  it: (url) => `Pagando confermi di aver letto l'informativa privacy: ${url}`,
+  en: (url) => `By paying you confirm that you have read the privacy notice: ${url}`,
+  ru: (url) => `Оплачивая, вы подтверждаете, что прочитали политику конфиденциальности: ${url}`,
 };
 // One privacy page per language at the site root (the default is Italian).
 const PRIVACY_PATH = { it: "/privacy-policy.html", en: "/privacy-policy.en.html", ru: "/privacy-policy.ru.html" };
@@ -61,20 +62,45 @@ class ValidationError extends Error {
   }
 }
 
-// Consents sent by the site: {privacy: true (required), marketing_optout: boolean (optional, default false)}.
-// Returns {privacy: true, marketing_optout}. privacy_required when the notice was not accepted (or consents is missing),
-// invalid_consents when marketing_optout is present but not a boolean.
+// Consents sent by the site: {privacy: true (required), email_marketing, other_channels, third_party: booleans}.
+//   privacy: order processing, must be exactly true (else privacy_required).
+//   email_marketing: the shop may use the data for future email contact; other_channels: further channels (phone, messages,
+//   social); third_party: sharing with third parties (surveys, market research). Missing booleans are false.
+//   Backward compatibility (pages cached before the four consents): marketing_optout:boolean with none of the new fields means
+//   email_marketing = !marketing_optout. Any value that is not a boolean is invalid_consents.
+// Returns {privacy: true, email_marketing, other_channels, third_party}.
+const CONSENT_FIELDS = ["email_marketing", "other_channels", "third_party", "marketing_optout"];
 function validateConsents(body) {
   const c = body && body.consents;
   if (!c || typeof c !== "object" || Array.isArray(c) || c.privacy !== true) throw new ValidationError("privacy_required");
-  if (c.marketing_optout !== undefined && typeof c.marketing_optout !== "boolean") throw new ValidationError("invalid_consents");
-  return { privacy: true, marketing_optout: c.marketing_optout === true };
+  for (const k of CONSENT_FIELDS) if (c[k] !== undefined && typeof c[k] !== "boolean") throw new ValidationError("invalid_consents");
+  const hasNew = ["email_marketing", "other_channels", "third_party"].some((k) => c[k] !== undefined);
+  return {
+    privacy: true,
+    email_marketing: hasNew ? c.email_marketing === true : c.marketing_optout === undefined ? false : !c.marketing_optout,
+    other_channels: c.other_channels === true,
+    third_party: c.third_party === true,
+  };
 }
 
 // PRIVACY_POLICY_VERSION identifies the notice text the customer accepted; stored in the session metadata.
 function privacyVersion(env) {
   const v = String((env && env.PRIVACY_POLICY_VERSION) || "").trim();
   return /^[A-Za-z0-9._-]{1,40}$/.test(v) ? v : DEFAULT_PRIVACY_VERSION;
+}
+
+// Base URL of the confirmation page (this Netlify site): CONFIRMATION_BASE_URL, else Netlify's own URL. https only, no credentials,
+// no query or hash; null when neither is set or the candidate is invalid (the caller then uses the old site success page).
+function normalizeConfirmBase(env) {
+  const raw = String((env && (env.CONFIRMATION_BASE_URL || env.URL)) || "").trim();
+  if (!raw) return { base: null, invalid: false };
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash) return { base: null, invalid: true };
+    return { base: raw.replace(/\/+$/, ""), invalid: false };
+  } catch (_) {
+    return { base: null, invalid: true };
+  }
 }
 
 function normalizeOrigin(o) {
@@ -253,9 +279,10 @@ function logLine(level, obj) {
 
 // Pure builder of the Stripe Checkout Session params. siteUrl must already be
 // validated (normalizeSiteUrl). Returns the params plus values used for logging.
-// `consents` ({privacy, marketing_optout}, from validateBody) adds the consent metadata (no personal data) and the
+// `confirmBase`: https base of the Netlify confirmation page (order-confirmed.html); without it success_url is the site's stripe-success.html.
+// `consents` ({privacy, email_marketing, other_channels, third_party}, from validateBody) adds the consent metadata (no personal data) and the
 // privacy line under the pay button; `privacyVersion` names the accepted notice.
-function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now, consents, privacyVersion: privacyVer = DEFAULT_PRIVACY_VERSION }) {
+function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now, consents, privacyVersion: privacyVer = DEFAULT_PRIVACY_VERSION, confirmBase = null }) {
   const loc = LOCALES.includes(locale) ? locale : null;
   const line_items = buildLineItems(items, catalogue, siteUrl, loc || "it");
   const physicalCents = physicalSubtotal(items, catalogue);
@@ -289,7 +316,7 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now,
   const params = {
     mode: "payment",
     line_items,
-    success_url: `${siteUrl}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}`,
+    success_url: confirmBase ? `${confirmBase}/order-confirmed.html?lang=${loc || "it"}&session_id={CHECKOUT_SESSION_ID}` : `${siteUrl}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${siteUrl}/stripe-cancel.html`,
     billing_address_collection: "required",
     phone_number_collection: { enabled: true },
@@ -310,7 +337,9 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now,
     // Evidence kept by Stripe with the session and copied by the webhook into the private orders tabs.
     params.metadata.privacy_accepted = "1";
     params.metadata.privacy_version = String(privacyVer);
-    params.metadata.marketing_optout = consents.marketing_optout ? "1" : "0";
+    params.metadata.consent_email = consents.email_marketing ? "1" : "0";
+    params.metadata.consent_channels = consents.other_channels ? "1" : "0";
+    params.metadata.consent_third_party = consents.third_party ? "1" : "0";
     params.metadata.consent_at = new Date(now()).toISOString();
     params.custom_text = { submit: { message: PRIVACY_TEXT[loc || "it"](`${siteUrl}${PRIVACY_PATH[loc || "it"]}`) } };
   }
@@ -402,6 +431,8 @@ function makeHandler({
       logLine("error", { event: "config_missing", request_id: requestId, variable: "STRIPE_SECRET_KEY" });
       return json(500, { error: "server_error" }, cors, requestId);
     }
+    const confirm = normalizeConfirmBase(env);
+    if (confirm.invalid) logLine("warn", { event: "config_invalid", request_id: requestId, variable: "CONFIRMATION_BASE_URL", reason: "must be an https URL without credentials, query or hash; the site success page is used" });
     const siteUrl = normalizeSiteUrl(env.SITE_URL);
     if (!siteUrl) {
       logLine("error", { event: "config_invalid", request_id: requestId, variable: "SITE_URL" });
@@ -457,7 +488,7 @@ function makeHandler({
 
     try {
       const { params, itemIds, itemIdsTruncated, bookingsTruncated, subtotalCents, shippingCents } = buildSessionParams({
-        items, locale, catalogue: cat, siteUrl, now, consents, privacyVersion: privacyVersion(env),
+        items, locale, catalogue: cat, siteUrl, now, consents, privacyVersion: privacyVersion(env), confirmBase: confirm.base,
       });
       if (itemIdsTruncated) {
         logLine("warn", { event: "metadata_item_ids_truncated", request_id: requestId, kept: params.metadata.item_ids });
@@ -508,6 +539,7 @@ exports.parseAllowedOrigins = parseAllowedOrigins;
 exports.validateBody = validateBody;
 exports.validateConsents = validateConsents;
 exports.privacyVersion = privacyVersion;
+exports.normalizeConfirmBase = normalizeConfirmBase;
 exports.PRIVACY_PATH = PRIVACY_PATH;
 exports.personsSuffix = personsSuffix;
 exports.buildLineItems = buildLineItems;

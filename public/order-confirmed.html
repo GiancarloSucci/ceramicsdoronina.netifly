@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Ordine confermato</title>
+  <style>
+    :root { --accent: #7d0f0f; --text: #2b2b2b; --muted: #6b6b6b; --bg: #fbf9f7; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body { background: var(--bg); color: var(--text); font-family: Georgia, "Times New Roman", serif; line-height: 1.6; display: flex; align-items: center; justify-content: center; padding: 24px 16px; min-height: 100vh; }
+    main { max-width: 520px; width: 100%; text-align: center; }
+    .brand { letter-spacing: .28em; font-size: 14px; color: var(--accent); margin: 0 0 28px; }
+    h1 { font-weight: normal; font-size: 30px; line-height: 1.25; margin: 0 0 16px; }
+    p { margin: 0 0 28px; color: var(--muted); font-size: 18px; }
+    a.btn { display: inline-block; background: var(--accent); color: #fff; text-decoration: none; padding: 12px 28px; border-radius: 999px; font-size: 16px; }
+    a.btn:hover, a.btn:focus-visible { background: #5f0b0b; }
+    a.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">DORONINA</div>
+    <h1 id="title">Grazie!</h1>
+    <p id="message">Il tuo ordine è andato a buon fine. Ti contatteremo a breve per i passi successivi.</p>
+    <a id="back" class="btn" href="https://ceramicsdoronina.it/">Torna al sito</a>
+  </main>
+  <script>
+    (function () {
+      var TEXT = {
+        it: { doc: "Ordine confermato", title: "Grazie!", message: "Il tuo ordine è andato a buon fine. Ti contatteremo a breve per i passi successivi.", back: "Torna al sito" },
+        en: { doc: "Order confirmed", title: "Thank you!", message: "Your order was successful. We will contact you shortly about the next steps.", back: "Back to the site" },
+        ru: { doc: "Заказ подтверждён", title: "Спасибо!", message: "Ваш заказ успешно оформлен. Мы скоро свяжемся с вами по дальнейшим шагам.", back: "Вернуться на сайт" }
+      };
+      var SITE = "https://ceramicsdoronina.it/";
+      var params = new URLSearchParams(window.location.search);
+      var lang = params.get("lang");
+      if (!TEXT[lang]) {
+        lang = String(navigator.language || "").slice(0, 2).toLowerCase();
+        if (!TEXT[lang]) lang = "it";
+      }
+      var t = TEXT[lang];
+      document.documentElement.lang = lang;
+      document.title = t.doc;
+      document.getElementById("title").textContent = t.title;
+      document.getElementById("message").textContent = t.message;
+      var back = document.getElementById("back");
+      back.textContent = t.back;
+      // The site page clears the cart; it gets the Checkout session id only when it has the expected shape. The id is never shown here.
+      var id = params.get("session_id");
+      back.href = id && /^cs_[A-Za-z0-9_]+$/.test(id) ? SITE + "stripe-success.html?session_id=" + id : SITE;
+    })();
+  </script>
+</body>
+</html>

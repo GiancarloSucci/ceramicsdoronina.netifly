@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert");
-const { makeHandler, isOriginAllowed, parseAllowedOrigins, computeShippingCents, validateBody, buildLineItems, buildSessionParams, normalizeSiteUrl, SHIPPING } = require("../functions/create-checkout.js");
+const { normalizeConfirmBase, makeHandler, isOriginAllowed, parseAllowedOrigins, computeShippingCents, validateBody, buildLineItems, buildSessionParams, normalizeSiteUrl, SHIPPING } = require("../functions/create-checkout.js");
 const { assertStripeRules, makeStripeFake } = require("./helpers/stripe-fake.js");
 
 const catalogue = {
@@ -428,13 +428,14 @@ test("live catalogue: sheet unreachable falls back to the snapshot (checkout kee
   }
 });
 
-// ---- consents (privacy notice accepted, marketing opt-out) ----
+// ---- consents (privacy required; email marketing, other channels, third parties) ----
 const mdOf = (calls) => calls[0].metadata;
+const ALL = { privacy: true, email_marketing: true, other_channels: true, third_party: true };
 
 test("consents: privacy must be exactly true; otherwise 400 privacy_required, before any Stripe call", async () => {
   const { handler, calls } = setup();
   const items = [{ id: "v1", quantity: 1 }];
-  for (const consents of [undefined, null, {}, { privacy: false }, { privacy: "true" }, { privacy: 1 }, { marketing_optout: true }, [], "yes", [true]]) {
+  for (const consents of [undefined, null, {}, { privacy: false }, { privacy: "true" }, { privacy: 1 }, { email_marketing: true }, { marketing_optout: false }, [], "yes", [true]]) {
     const body = consents === undefined ? { items, consents: undefined } : { items, consents };
     const r = await handler(post(body));
     assert.equal(r.statusCode, 400, JSON.stringify(consents));
@@ -459,53 +460,66 @@ test("consents: privacy_required is decided before the seat-holds lookup (no Str
   assert.equal(calls.length, 0);
 });
 
-test("consents: marketing_optout must be a boolean when present (invalid_consents); absent means false", async () => {
+test("consents: every optional consent must be a boolean when present (invalid_consents); missing ones are false", async () => {
   const { handler, calls } = setup();
   const items = [{ id: "v1", quantity: 1 }];
-  for (const marketing_optout of ["yes", 1, 0, null, "true", {}, []]) {
-    const r = await handler(post({ items, consents: { privacy: true, marketing_optout } }));
-    assert.equal(r.statusCode, 400, JSON.stringify(marketing_optout));
-    assert.equal(JSON.parse(r.body).error, "invalid_consents", JSON.stringify(marketing_optout));
+  for (const key of ["email_marketing", "other_channels", "third_party", "marketing_optout"]) {
+    for (const bad of ["yes", 1, 0, null, "true", {}, []]) {
+      const r = await handler(post({ items, consents: { privacy: true, [key]: bad } }));
+      assert.equal(r.statusCode, 400, `${key}=${JSON.stringify(bad)}`);
+      assert.equal(JSON.parse(r.body).error, "invalid_consents", `${key}=${JSON.stringify(bad)}`);
+    }
   }
   assert.equal(calls.length, 0);
   assert.equal((await handler(post({ items, consents: { privacy: true } }))).statusCode, 200);
-  assert.equal(mdOf(calls).marketing_optout, "0");
+  assert.deepEqual([mdOf(calls).consent_email, mdOf(calls).consent_channels, mdOf(calls).consent_third_party], ["0", "0", "0"], "nothing sent: nothing granted");
 });
 
-test("consents: validateBody returns {privacy, marketing_optout}; errors are ValidationError with the code", () => {
-  const ok = validateBody({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, marketing_optout: true } }, catalogue, []);
-  assert.deepEqual(ok.consents, { privacy: true, marketing_optout: true });
-  for (const [consents, code] of [[undefined, "privacy_required"], [{ privacy: false }, "privacy_required"], [{ privacy: true, marketing_optout: "x" }, "invalid_consents"]]) {
+test("consents: validateBody returns the four values; old pages (marketing_optout only) map to email_marketing = !optout", () => {
+  const v = (consents) => validateBody({ items: [{ id: "v1", quantity: 1 }], consents }, catalogue, []).consents;
+  assert.deepEqual(v(ALL), ALL);
+  assert.deepEqual(v({ privacy: true, email_marketing: false }), { privacy: true, email_marketing: false, other_channels: false, third_party: false });
+  assert.deepEqual(v({ privacy: true, other_channels: true }), { privacy: true, email_marketing: false, other_channels: true, third_party: false }, "new fields present: email is false when missing");
+  assert.deepEqual(v({ privacy: true, marketing_optout: false }), { privacy: true, email_marketing: true, other_channels: false, third_party: false }, "cached old page, did not object");
+  assert.deepEqual(v({ privacy: true, marketing_optout: true }), { privacy: true, email_marketing: false, other_channels: false, third_party: false }, "cached old page, objected");
+  assert.deepEqual(v({ privacy: true, email_marketing: true, marketing_optout: true }), { privacy: true, email_marketing: true, other_channels: false, third_party: false }, "the new fields win");
+  assert.deepEqual(v({ privacy: true }), { privacy: true, email_marketing: false, other_channels: false, third_party: false });
+  for (const [consents, code] of [[undefined, "privacy_required"], [{ privacy: false }, "privacy_required"], [{ privacy: true, third_party: "x" }, "invalid_consents"]]) {
     assert.throws(() => validateBody({ items: [{ id: "v1", quantity: 1 }], consents }, catalogue, []), { name: "ValidationError", code });
   }
 });
 
-test("consent metadata on the session: privacy_accepted, notice version, opt-out, timestamp, and no personal data", async () => {
+test("consent metadata on the session: privacy_accepted, three consents, notice version, timestamp; marketing_optout is no longer written; no personal data", async () => {
   let { handler, calls } = setup();
-  await handler(post({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, marketing_optout: true } }));
-  assert.deepEqual(mdOf(calls), { item_ids: "v1", privacy_accepted: "1", privacy_version: "2026-11", marketing_optout: "1", consent_at: "2001-09-09T01:46:40.000Z" });
+  await handler(post({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, email_marketing: true, other_channels: false, third_party: true } }));
+  assert.deepEqual(mdOf(calls), { item_ids: "v1", privacy_accepted: "1", consent_email: "1", consent_channels: "0", consent_third_party: "1", privacy_version: "2026-11-04", consent_at: "2001-09-09T01:46:40.000Z" });
+  assert.ok(!("marketing_optout" in mdOf(calls)));
+  ({ handler, calls } = setup());
+  await handler(post({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, marketing_optout: true } })); // cached old page
+  assert.deepEqual([mdOf(calls).consent_email, mdOf(calls).consent_channels, mdOf(calls).consent_third_party, "marketing_optout" in mdOf(calls)], ["0", "0", "0", false]);
   ({ handler, calls } = setup({ env: { PRIVACY_POLICY_VERSION: "2027-02" } }));
   await handler(post({ items: [{ id: "v1", quantity: 1 }, { id: "mc1", quantity: 2 }] }));
   assert.equal(mdOf(calls).privacy_version, "2027-02");
-  assert.equal(mdOf(calls).marketing_optout, "0");
   assert.equal(mdOf(calls).item_ids, "v1,mc1", "existing metadata is intact");
   for (const bad of ["", "has space", "x".repeat(41), "a/b", "<b>"]) {
     ({ handler, calls } = setup({ env: { PRIVACY_POLICY_VERSION: bad } }));
     await handler(post({ items: [{ id: "v1", quantity: 1 }] }));
-    assert.equal(mdOf(calls).privacy_version, "2026-11", "invalid PRIVACY_POLICY_VERSION falls back: " + bad);
+    assert.equal(mdOf(calls).privacy_version, "2026-11-04", "invalid PRIVACY_POLICY_VERSION falls back: " + bad);
   }
-  assert.ok(!JSON.stringify(mdOf(calls)).match(/@|mail|name|phone/i));
+  assert.ok(!JSON.stringify(mdOf(calls)).match(/@|name|phone/i));
 });
 
-test("custom_text under the pay button: privacy notice line in it/en/ru with the privacy page of that language, <= 500 chars", async () => {
+test("custom_text under the pay button only says the privacy notice was read, in it/en/ru, with the page of that language, <= 500 chars", async () => {
   const pages = { it: "privacy-policy.html", en: "privacy-policy.en.html", ru: "privacy-policy.ru.html" };
-  for (const [loc, word, page] of [["it", "informativa privacy", pages.it], ["en", "privacy notice", pages.en], ["ru", "конфиденциальности", pages.ru], [undefined, "informativa privacy", pages.it], ["xx", "informativa privacy", pages.it]]) {
+  const wording = { it: "Pagando confermi di aver letto l'informativa privacy: ", en: "By paying you confirm that you have read the privacy notice: ", ru: "Оплачивая, вы подтверждаете, что прочитали политику конфиденциальности: " };
+  for (const [loc, key] of [["it", "it"], ["en", "en"], ["ru", "ru"], [undefined, "it"], ["xx", "it"]]) {
     const { handler, calls } = setup({ env: { SITE_URL: "https://ceramicsdoronina.it/" } });
     await handler(post({ items: [{ id: "v1", quantity: 1 }], locale: loc }));
     const msg = calls[0].custom_text.submit.message;
-    assert.ok(msg.includes(word) && msg.endsWith("https://ceramicsdoronina.it/" + page) && msg.length <= 500, `${loc}: ${msg}`);
-    // no other language's page in the message (privacy-policy.html is a prefix of nothing else, so check the endings)
-    for (const other of Object.values(pages)) if (other !== page) assert.ok(!msg.includes("/" + other), `${loc} must not link ${other}`);
+    assert.equal(msg, wording[key] + "https://ceramicsdoronina.it/" + pages[key], String(loc));
+    assert.ok(msg.length <= 500);
+    for (const other of Object.values(pages)) if (other !== pages[key]) assert.ok(!msg.includes("/" + other), `${loc} must not link ${other}`);
+    assert.ok(!/marketing|маркет/i.test(msg), "the Stripe line says nothing about consents");
   }
 });
 
@@ -513,4 +527,44 @@ test("buildSessionParams without consents (direct call) adds no consent metadata
   const out = buildSessionParams({ items: [{ id: "v1", quantity: 1 }], locale: "it", catalogue, siteUrl: "https://s.it", now: () => 5_000_000 });
   assert.deepEqual(out.params.metadata, { item_ids: "v1" });
   assert.equal(out.params.custom_text, undefined);
+});
+
+// ---- success_url: the confirmation page on Netlify, with fallbacks ----
+test("success_url: CONFIRMATION_BASE_URL (or Netlify's URL) gives the order-confirmed page with lang and the session placeholder; cancel_url is unchanged", async () => {
+  for (const [loc, lang] of [["it", "it"], ["en", "en"], ["ru", "ru"], [undefined, "it"], ["xx", "it"]]) {
+    const { handler, calls } = setup({ env: { CONFIRMATION_BASE_URL: "https://shop.netlify.app/", SITE_URL: "https://ceramicsdoronina.it" } });
+    assert.equal((await handler(post({ items: [{ id: "v1", quantity: 1 }], locale: loc }))).statusCode, 200);
+    assert.equal(calls[0].success_url, `https://shop.netlify.app/order-confirmed.html?lang=${lang}&session_id={CHECKOUT_SESSION_ID}`, String(loc));
+    assert.equal(calls[0].cancel_url, "https://ceramicsdoronina.it/stripe-cancel.html");
+  }
+  const viaUrl = setup({ env: { URL: "https://ceramicsdoronina.netlify.app" } });
+  await viaUrl.handler(post({ items: [{ id: "v1", quantity: 1 }], locale: "en" }));
+  assert.equal(viaUrl.calls[0].success_url, "https://ceramicsdoronina.netlify.app/order-confirmed.html?lang=en&session_id={CHECKOUT_SESSION_ID}", "Netlify's own URL is used when CONFIRMATION_BASE_URL is unset");
+  const both = setup({ env: { CONFIRMATION_BASE_URL: "https://mine.example", URL: "https://ceramicsdoronina.netlify.app" } });
+  await both.handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+  assert.ok(both.calls[0].success_url.startsWith("https://mine.example/order-confirmed.html"), "CONFIRMATION_BASE_URL wins");
+});
+
+test("success_url fallbacks: nothing set, or an invalid base (http, credentials, query, hash, junk), gives the site's stripe-success page; invalid is logged", async () => {
+  const old = "https://ceramicsdoronina.it/stripe-success.html?session_id={CHECKOUT_SESSION_ID}";
+  const none = setup();
+  await none.handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+  assert.equal(none.calls[0].success_url, old);
+  for (const bad of ["http://shop.netlify.app", "https://user:pw@shop.netlify.app", "https://shop.netlify.app/?a=1", "https://shop.netlify.app/#x", "not a url", "ftp://x.example"]) {
+    const logs = [];
+    const orig = console.warn;
+    console.warn = (m) => logs.push(String(m));
+    let x;
+    try {
+      x = setup({ env: { CONFIRMATION_BASE_URL: bad } });
+      assert.equal((await x.handler(post({ items: [{ id: "v1", quantity: 1 }] }))).statusCode, 200, bad);
+    } finally {
+      console.warn = orig;
+    }
+    assert.equal(x.calls[0].success_url, old, bad);
+    assert.ok(logs.some((l) => l.includes('"event":"config_invalid"') && l.includes("CONFIRMATION_BASE_URL")), "logged: " + bad);
+    assert.ok(!logs.join("").includes("pw@"), "the credentials are never logged");
+  }
+  assert.deepEqual(normalizeConfirmBase({ CONFIRMATION_BASE_URL: "https://a.example/x/" }), { base: "https://a.example/x", invalid: false });
+  assert.deepEqual(normalizeConfirmBase({}), { base: null, invalid: false });
 });

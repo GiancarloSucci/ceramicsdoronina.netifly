@@ -6,8 +6,9 @@
 //         "customer": {"email", "name", "phone", "locale": "it|en|ru", "billing": {line1,line2,city,postal_code,state,country},
 //                      "shipping": {name,line1,line2,city,postal_code,state,country}},        (customer: optional, all fields optional)
 //         "order": {"total_cents", "currency", "created_iso", "lines": [{"id","kind":"vasi|masterclass|certificati","name","quantity","seats?","amount_cents"}]},
-//         "consent": {"privacy": true, "privacy_version": "2026-11", "marketing_optout": false, "at": "ISO"}}   (order, consent: optional)
-//   -> {"ok":true,"version":9,"sheet":"Vasi","marked":[...],
+//         "consent": {"privacy": true, "email_marketing": true, "other_channels": false, "third_party": false,
+//                     "privacy_version": "2026-11-04", "at": "ISO"}}   (order, consent: optional)
+//   -> {"ok":true,"version":10,"sheet":"Vasi","marked":[...],
 //       "booked":[{"id":"mc1","seats":2,"booked_after":2,"total":8,"overbooked":false,"duplicate":false,
 //                  "calendar":{"status":"created|exists|skipped|failed","reason":"..."}}],
 //       "orders":{"status":"ok|skipped|failed","reason":"...","rows":3}}
@@ -24,8 +25,12 @@
 // creates a file named 'Ceramics Doronina - Ordini' in the owner's My Drive (private by default), stores its id in that property and
 // logs its URL with Logger.log only. If that file cannot be opened or created the reply says orders failed (orders_sheet_unavailable);
 // the order is never written to the bound spreadsheet. Never share that file publicly or publish it to the web.
-// First columns of every order tab: data_ora, session_id, tipo, nome, email, telefono, marketing_opposizione (SI = the customer
-// objected to marketing, cells highlighted), contattabile_marketing (SI = privacy accepted and no objection); basic filter on the header.
+// First columns of every order tab: data_ora, session_id, tipo, nome, email, telefono, consenso_email, consenso_altri_canali,
+// consenso_terzi, consenso_ordine (SI/NO each). consenso_email = NO is highlighted light red, consenso_altri_canali / consenso_terzi = SI
+// light green; basic filter on the header. authorize() creates the orders file AND the three tabs (header bold, frozen, filtered) and
+// removes the empty default first sheet, so the owner sees the finished file before the first order; creating a tab on the first
+// order stays as a fallback. A tab whose header differs from the expected one is never written to: orders failed, reason
+// orders_layout_outdated (delete the old order tabs and run authorize again).
 // A line already logged for (session_id, item_id) is skipped, so a Stripe retry never duplicates rows. Text cells that start with
 // = + - @ (or a tab/CR) get a leading apostrophe so a customer cannot plant a spreadsheet formula. A problem with the order
 // log never undoes marking or booking: it is reported in `orders`. `order` missing (older Netlify function) = orders skipped.
@@ -56,20 +61,22 @@ var MAX_LINES = 50; // order lines per call
 var ORDER_TABS = { vasi: 'Ordini_Vasi', masterclass: 'Ordini_Masterclass', certificati: 'Ordini_Certificati' };
 var ORDERS_FILE_NAME = 'Ceramics Doronina - Ordini';
 var ORDERS_ID_PROPERTY = 'ORDERS_SPREADSHEET_ID';
-var ORDER_HEADERS = ['data_ora', 'session_id', 'tipo', 'nome', 'email', 'telefono', 'marketing_opposizione', 'contattabile_marketing',
+var ORDER_HEADERS = ['data_ora', 'session_id', 'tipo', 'nome', 'email', 'telefono', 'consenso_email', 'consenso_altri_canali', 'consenso_terzi', 'consenso_ordine',
   'item_id', 'prodotto', 'quantita', 'persone', 'importo_riga', 'valuta', 'totale_ordine',
   'fatt_indirizzo', 'fatt_cap', 'fatt_citta', 'fatt_provincia', 'fatt_paese',
   'sped_nome', 'sped_indirizzo', 'sped_cap', 'sped_citta', 'sped_provincia', 'sped_paese',
-  'lingua', 'privacy_accettata', 'versione_informativa', 'data_consenso', 'calendar_event_id'];
+  'lingua', 'versione_informativa', 'data_consenso', 'calendar_event_id'];
 var SESSION_COL = 2; // 1-based columns used for idempotency
-var ITEM_COL = 9;
-var OPT_COL = 7; // marketing_opposizione (contattabile_marketing is the next column)
-var OPT_COLOR = '#fde2e2';
+var ITEM_COL = 11;
+var EMAIL_COL = 7; // consenso_email; consenso_altri_canali = 8, consenso_terzi = 9, consenso_ordine = 10
+var NO_COLOR = '#fde2e2'; // consenso_email = NO
+var YES_COLOR = '#e2f3e2'; // consenso_altri_canali / consenso_terzi = SI
+var DEFAULT_SHEET_NAMES = ['Foglio1', 'Sheet1', 'Foglio 1', 'Sheet 1', 'Лист1'];
 var PHONE_COL = 6; // 1-based column of telefono: plain-text format so a leading + or 0 survives
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
 var MAX_SEATS = 999; // persons in ONE booking (1..999; linear pricing is not limited to 20)
-var VERSION = 9; // Version
+var VERSION = 10; // Version
 
 function doPost(e) {
   var body;
@@ -174,12 +181,15 @@ function cleanOrder_(o) {
   };
 }
 
+// Consent record: privacy (order processing), email (email marketing), channels (other channels), third (third parties).
+// A payload from the previous contract (marketing_optout, no email_marketing) maps to email = not objected.
 function cleanConsent_(c) {
   c = c && typeof c === 'object' ? c : {};
   var str = function (v) {
     return typeof v === 'string' ? v.trim().slice(0, 40) : '';
   };
-  return { privacy: c.privacy === true, version: str(c.privacy_version), optout: c.marketing_optout === true, at: str(c.at) };
+  var email = c.email_marketing !== undefined ? c.email_marketing === true : c.marketing_optout !== undefined ? c.marketing_optout === false : false;
+  return { privacy: c.privacy === true, email: email, channels: c.other_channels === true, third: c.third_party === true, version: str(c.privacy_version), at: str(c.at) };
 }
 
 function validBooking_(b) {
@@ -298,6 +308,39 @@ function joinAddress_(a) {
   return [a.line1, a.line2].filter(function (x) { return x; }).join(', ');
 }
 
+// Returns the order tab `name` of `target`, creating it (header bold, frozen, filtered) when it does not exist or is empty.
+// {sh, layout:'ok'|'outdated'}: a tab whose header row differs from ORDER_HEADERS is left alone.
+function ensureOrderTab_(target, name) {
+  var sh = target.getSheetByName(name);
+  var data = sh ? sh.getDataRange().getValues() : [];
+  if (!sh) sh = target.insertSheet(name);
+  if (!data.length || !data[0].length) {
+    sh.getRange(1, 1, 1, ORDER_HEADERS.length).setValues([ORDER_HEADERS]);
+    sh.getRange(1, 1, 1, ORDER_HEADERS.length).setFontWeight('bold');
+    sh.setFrozenRows(1);
+    try {
+      sh.getRange(1, 1, sh.getMaxRows(), ORDER_HEADERS.length).createFilter(); // filter on the header row (covers the rows below)
+    } catch (err) {
+      // a missing filter is only cosmetic
+    }
+    return { sh: sh, data: [ORDER_HEADERS], layout: 'ok' };
+  }
+  return { sh: sh, data: data, layout: data[0].join(',') === ORDER_HEADERS.join(',') ? 'ok' : 'outdated' };
+}
+
+// Deletes the empty default first sheet (Foglio1 / Sheet1) of a freshly created file, only when other sheets exist.
+function removeDefaultSheet_(target) {
+  try {
+    var sheets = target.getSheets();
+    if (sheets.length < 2) return;
+    sheets.forEach(function (sh) {
+      if (DEFAULT_SHEET_NAMES.indexOf(sh.getName()) >= 0 && sh.getLastRow() === 0 && target.getSheets().length > 1) target.deleteSheet(sh);
+    });
+  } catch (err) {
+    // cosmetic only
+  }
+}
+
 // Writes one row per order line in the private tab of its kind. Never throws; returns {status, reason?, rows}:
 //   ok (all lines logged or already there; reason 'partial' when some line was dropped or failed), skipped (nothing to log), failed.
 // `rows` counts the lines that are in the tabs after the call (new ones and the ones a retry found already there).
@@ -312,33 +355,26 @@ function logOrder_(sessionId, order, customer, consent, events) {
     } catch (err) {
       return { status: 'failed', reason: 'orders_sheet_unavailable', rows: 0 };
     }
+    var kinds = Object.keys(ORDER_TABS).filter(function (kind) {
+      return order.lines.some(function (l) { return l.kind === kind; });
+    });
+    var tabs = {};
+    for (var t = 0; t < kinds.length; t++) {
+      var tab = ensureOrderTab_(target, ORDER_TABS[kinds[t]]);
+      if (tab.layout !== 'ok') return { status: 'failed', reason: 'orders_layout_outdated', rows: 0 }; // nothing is written
+      tabs[kinds[t]] = tab;
+    }
     var rows = 0;
     var failed = order.skipped;
     var when = order.created_iso || new Date().toISOString();
     var money = function (cents) {
       return cents / 100;
     };
-    Object.keys(ORDER_TABS).forEach(function (kind) {
+    kinds.forEach(function (kind) {
       var mine = order.lines.filter(function (l) { return l.kind === kind; });
-      if (!mine.length) return;
       try {
-        var sh = target.getSheetByName(ORDER_TABS[kind]);
-        var data = sh ? sh.getDataRange().getValues() : [];
-        if (!sh) sh = target.insertSheet(ORDER_TABS[kind]);
-        if (!data.length || !data[0].length) {
-          sh.getRange(1, 1, 1, ORDER_HEADERS.length).setValues([ORDER_HEADERS]);
-          sh.getRange(1, 1, 1, ORDER_HEADERS.length).setFontWeight('bold');
-          sh.setFrozenRows(1);
-          try {
-            sh.getRange(1, 1, sh.getMaxRows(), ORDER_HEADERS.length).createFilter(); // filter on the header row (covers the rows below)
-          } catch (err) {
-            // a missing filter is only cosmetic
-          }
-          data = [ORDER_HEADERS];
-        } else if (data[0].join(',') !== ORDER_HEADERS.join(',')) {
-          failed += mine.length;
-          return;
-        }
+        var sh = tabs[kind].sh;
+        var data = tabs[kind].data;
         var done = {};
         for (var i = 1; i < data.length; i++) done[String(data[i][SESSION_COL - 1]) + '|' + String(data[i][ITEM_COL - 1])] = true;
         var fresh = [];
@@ -352,13 +388,15 @@ function logOrder_(sessionId, order, customer, consent, events) {
           var b = customer.billing;
           var sp = customer.shipping;
           var text = safeText_;
-          var contactable = consent.privacy && !consent.optout;
+          var yn = function (v) {
+            return v ? 'SI' : 'NO';
+          };
           fresh.push([
-            text(when), text(sessionId), text(kind), text(customer.name), text(customer.email), customer.phone, consent.optout ? 'SI' : 'NO', contactable ? 'SI' : 'NO',
+            text(when), text(sessionId), text(kind), text(customer.name), text(customer.email), customer.phone, yn(consent.email), yn(consent.channels), yn(consent.third), yn(consent.privacy),
             text(l.id), text(l.name), l.quantity, l.seats || '', money(l.amount_cents), text(order.currency), money(order.total_cents),
             text(joinAddress_(b)), text(b.postal_code), text(b.city), text(b.state), text(b.country),
             text(sp.name), text(joinAddress_(sp)), text(sp.postal_code), text(sp.city), text(sp.state), text(sp.country),
-            text(customer.locale), consent.privacy ? 'SI' : 'NO', text(consent.version), text(consent.at), text(events[l.id] || '')
+            text(customer.locale), text(consent.version), text(consent.at), text(events[l.id] || '')
           ]);
         });
         if (fresh.length) {
@@ -370,7 +408,9 @@ function logOrder_(sessionId, order, customer, consent, events) {
           });
           sh.getRange(first, 1, fresh.length, ORDER_HEADERS.length).setValues(fresh);
           fresh.forEach(function (r, k) {
-            if (r[OPT_COL - 1] === 'SI') sh.getRange(first + k, OPT_COL, 1, 2).setBackground(OPT_COLOR); // the customer objected: clearly visible
+            if (r[EMAIL_COL - 1] === 'NO') sh.getRange(first + k, EMAIL_COL, 1, 1).setBackground(NO_COLOR); // no email contact allowed: clearly visible
+            if (r[EMAIL_COL] === 'SI') sh.getRange(first + k, EMAIL_COL + 1, 1, 1).setBackground(YES_COLOR); // other channels allowed
+            if (r[EMAIL_COL + 1] === 'SI') sh.getRange(first + k, EMAIL_COL + 2, 1, 1).setBackground(YES_COLOR); // third parties allowed
           });
           rows += fresh.length;
         }
@@ -499,11 +539,15 @@ function doGet() {
 }
 
 // Run once from the editor (Run > authorize) to grant the Google Calendar permission; returns the calendar name.
-// Run it again after pasting a new version of this script: version 9 needs the permission to open other spreadsheets
-// (the separate orders file, created on the first run: look for 'Ceramics Doronina - Ordini' in My Drive; its URL is in the execution log),
+// Run it again after pasting a new version of this script: version 10 needs the permission to open other spreadsheets
+// (the separate orders file, created on the first run with its three tabs: look for 'Ceramics Doronina - Ordini' in My Drive; its URL is in the execution log),
 // and the deployed web app only works once that permission has been granted.
 function authorize() {
-  ordersSpreadsheet_(false); // asks for the permission to create/open the separate orders file (and creates it on first run)
+  var target = ordersSpreadsheet_(false); // asks for the permission to create/open the separate orders file (and creates it on first run)
+  Object.keys(ORDER_TABS).forEach(function (kind) {
+    ensureOrderTab_(target, ORDER_TABS[kind]); // the three tabs exist, with their header, before the first order
+  });
+  removeDefaultSheet_(target); // the empty Foglio1 / Sheet1 of the new file
   return CalendarApp.getDefaultCalendar().getName();
 }
 

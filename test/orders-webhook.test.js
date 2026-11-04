@@ -16,7 +16,7 @@ const CAT = {
 };
 const getCatalogue = async () => ({ items: CAT });
 const PII = ["ann@example.com", "Ann Rossi", "+39 380 632 7838", "Via Roma 1", "Via Po 2", "16123", "Torino"];
-const CONSENT_MD = { privacy_accepted: "1", privacy_version: "2026-11", marketing_optout: "1", consent_at: "2026-11-04T10:00:00.000Z" };
+const CONSENT_MD = { privacy_accepted: "1", consent_email: "1", consent_channels: "0", consent_third_party: "1", privacy_version: "2026-11-04", consent_at: "2026-11-04T10:00:00.000Z" };
 const session = (metadata, over = {}) => ({
   id: "cs_ord", created: 1793786400, amount_total: 41000, currency: "eur", payment_status: "paid", locale: "en", metadata,
   customer_details: { email: "ann@example.com", name: "Ann Rossi", phone: "+39 380 632 7838", address: { line1: "Via Roma 1", line2: "int. 4", city: "Genova", postal_code: "16123", state: "GE", country: "IT" } },
@@ -84,7 +84,7 @@ test("mixed cart (vase + masterclass + gift certificate): ONE post with order li
       { id: "gc-50", kind: "certificati", name: "Gift card", quantity: 2, amount_cents: 5000 },
     ],
   });
-  assert.deepEqual(b.consent, { privacy: true, privacy_version: "2026-11", marketing_optout: true, at: "2026-11-04T10:00:00.000Z" });
+  assert.deepEqual(b.consent, { privacy: true, email_marketing: true, other_channels: false, third_party: true, privacy_version: "2026-11-04", at: "2026-11-04T10:00:00.000Z" });
   assert.deepEqual(x.body, { received: true, sheet: "ok", calendar: "ok", orders: "ok", script_version: 9 });
   assert.deepEqual(listCalls[0][1], { limit: 100, expand: ["data.price.product"] }, "product metadata gives the catalogue id of every line");
 });
@@ -107,7 +107,7 @@ test("gift certificates only: nothing to mark or book, but the order is still lo
 
 test("an old session without consent metadata is logged with privacy false and no version", async () => {
   const x = await run(session({ item_ids: "gc-50" }), { lines: [LI("gc-50", "Gift card", 5000)], reply: v9({ status: "ok", rows: 1 }) });
-  assert.deepEqual(x.posts[0].consent, { privacy: false, privacy_version: "", marketing_optout: false, at: "" });
+  assert.deepEqual(x.posts[0].consent, { privacy: false, email_marketing: false, other_channels: false, third_party: false, privacy_version: "", at: "" });
 });
 
 test("line ids fall back on item_ids order, then on the catalogue, when Stripe gives no product metadata", async () => {
@@ -178,9 +178,13 @@ test("buildCustomer / buildConsent / buildOrder: shapes, caps and omissions", ()
   const long = buildCustomer(session({}, { customer_details: { name: "n".repeat(500), address: { line1: "l".repeat(500) } } }));
   assert.deepEqual([long.name.length, long.billing.line1.length], [200, 200]);
   assert.deepEqual(buildCustomer(session({}, { locale: "de" })).locale, "it");
-  assert.deepEqual(buildConsent({ metadata: CONSENT_MD }), { privacy: true, privacy_version: "2026-11", marketing_optout: true, at: "2026-11-04T10:00:00.000Z" });
-  assert.deepEqual(buildConsent({}), { privacy: false, privacy_version: "", marketing_optout: false, at: "" });
-  assert.equal(buildConsent({ metadata: { privacy_accepted: "0", marketing_optout: "0" } }).privacy, false);
+  assert.deepEqual(buildConsent({ metadata: CONSENT_MD }), { privacy: true, email_marketing: true, other_channels: false, third_party: true, privacy_version: "2026-11-04", at: "2026-11-04T10:00:00.000Z" });
+  assert.deepEqual(buildConsent({}), { privacy: false, email_marketing: false, other_channels: false, third_party: false, privacy_version: "", at: "" });
+  assert.equal(buildConsent({ metadata: { privacy_accepted: "0", consent_email: "1" } }).privacy, false);
+  // sessions created before the four consents carry marketing_optout: email_marketing = not objected, the other two false
+  assert.deepEqual(buildConsent({ metadata: { privacy_accepted: "1", marketing_optout: "0", privacy_version: "2026-11", consent_at: "t" } }), { privacy: true, email_marketing: true, other_channels: false, third_party: false, privacy_version: "2026-11", at: "t" });
+  assert.equal(buildConsent({ metadata: { privacy_accepted: "1", marketing_optout: "1" } }).email_marketing, false);
+  assert.equal(buildConsent({ metadata: { privacy_accepted: "1", consent_email: "0", marketing_optout: "0" } }).email_marketing, false, "the new key wins");
   const o = buildOrder(session({ item_ids: "v3,nope" }), [], "v3,nope", [], CAT);
   assert.deepEqual([o.order.lines.map((l) => l.id), o.skipped], [["v3"], 1], "an id that is not in the catalogue cannot be filed in a tab");
   const many = buildOrder(session({}), Array.from({ length: 60 }, (_, i) => LI("v3", "Vaso", 1)), "", [], CAT);

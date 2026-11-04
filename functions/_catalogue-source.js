@@ -770,10 +770,17 @@ function cleanOrder(o) {
   return { total_cents: int(o.total_cents), currency: cleanStr(o.currency, 10).toLowerCase(), created_iso: cleanStr(o.created_iso, 40), lines };
 }
 
-// Consent record of contract v4: {privacy, privacy_version, marketing_optout, at}.
+// Consent record of contract v4 (script version 10): {privacy, email_marketing, other_channels, third_party, privacy_version, at}.
 function cleanConsent(c) {
   c = c && typeof c === "object" ? c : {};
-  return { privacy: c.privacy === true, privacy_version: cleanStr(c.privacy_version, 40), marketing_optout: c.marketing_optout === true, at: cleanStr(c.at, 40) };
+  return {
+    privacy: c.privacy === true,
+    email_marketing: c.email_marketing === true,
+    other_channels: c.other_channels === true,
+    third_party: c.third_party === true,
+    privacy_version: cleanStr(c.privacy_version, 40),
+    at: cleanStr(c.at, 40),
+  };
 }
 
 // Marks ids as sold and books masterclass seats ({id, seats} in `bookings`, with the Stripe

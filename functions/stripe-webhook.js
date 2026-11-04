@@ -14,9 +14,9 @@
 // a missing, failed or skipped event becomes an ACTION line for the owner and calendar: "partial" in the 200 answer. Marking problems never change the 200 answer to Stripe:
 // the owner is told to mark by hand. Booked seats also count locally for 15 minutes (per session id, so
 // Stripe retries never count twice), until the published CSV catches up.
-// Contract v4 (script version 9): the same ONE POST of every paid session also carries `order` ({total_cents, currency,
+// Contract v4 (script version 10): the same ONE POST of every paid session also carries `order` ({total_cents, currency,
 // created_iso, lines:[{id, kind: vasi|masterclass|certificati, name, quantity, seats?, amount_cents}]}), the extended
-// `customer` (phone, billing and shipping address) and `consent` (privacy accepted + notice version, marketing opt-out,
+// `customer` (phone, billing and shipping address) and `consent` (privacy, email_marketing, other_channels, third_party, notice version,
 // from the session metadata). The script logs one row per line in its PRIVATE tabs Ordini_Vasi / Ordini_Masterclass /
 // Ordini_Certificati and replies `orders:{status, reason?, rows}`; the 200 answer shows it as `orders`
 // (ok | partial | none | failed:<code>). Even a session with nothing to mark or book (e.g. only gift certificates)
@@ -170,10 +170,13 @@ function buildCustomer(sess) {
   return c;
 }
 
-// Consent evidence copied from the session metadata written by create-checkout (old sessions have none: privacy false).
+// Consent evidence copied from the session metadata written by create-checkout: privacy_accepted, consent_email, consent_channels,
+// consent_third_party, privacy_version, consent_at. Sessions created before the four consents carry marketing_optout instead
+// (email_marketing = not objected); sessions with no consent metadata at all are all false ("not recorded").
 function buildConsent(sess) {
   const md = (sess && sess.metadata) || {};
-  return { privacy: md.privacy_accepted === "1", privacy_version: str(md.privacy_version, 40), marketing_optout: md.marketing_optout === "1", at: str(md.consent_at, 40) };
+  const email = md.consent_email !== undefined ? md.consent_email === "1" : md.marketing_optout !== undefined ? md.marketing_optout !== "1" : false;
+  return { privacy: md.privacy_accepted === "1", email_marketing: email, other_channels: md.consent_channels === "1", third_party: md.consent_third_party === "1", privacy_version: str(md.privacy_version, 40), at: str(md.consent_at, 40) };
 }
 
 function lineKind(item) {

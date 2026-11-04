@@ -65,11 +65,14 @@ function script(sheets, secret = "S", { props = {}, calendar = fakeCalendar(), o
         getLastRow: () => d.length,
         getMaxRows: () => 1000,
         setFrozenRows: (n) => { m.frozen = n; },
+        getName: () => name,
       };
     };
     return {
       getSheetByName: (n) => (tabs[n] ? mk(n) : null),
       insertSheet: (n) => { tabs[n] = []; return mk(n); },
+      getSheets: () => Object.keys(tabs).map(mk),
+      deleteSheet: (sh) => { delete tabs[sh.getName()]; },
       getId: () => id,
       getUrl: () => "https://docs.google.com/spreadsheets/d/" + id + "/edit",
     };
@@ -87,7 +90,7 @@ function script(sheets, secret = "S", { props = {}, calendar = fakeCalendar(), o
       create: (name) => {
         if (failCreate) throw new Error("drive refused");
         const id = "auto" + (created.length + 1);
-        others[id] = {};
+        others[id] = { Sheet1: [] }; // Google gives a new file one empty default sheet
         created.push({ id, name });
         return book(others[id], id + ":", id);
       },
@@ -120,7 +123,7 @@ test("marks vases and books seats in one call (v2 reply)", () => {
   const s = fresh();
   const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 2 }, { id: "nope", seats: 1 }] });
   assert.deepEqual(r, {
-    ok: true, version: 9, sheet: "Vasi", marked: ["v3"], orders: NO_ORDER,
+    ok: true, version: 10, sheet: "Vasi", marked: ["v3"], orders: NO_ORDER,
     booked: [
       { id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false, calendar: SKIP }, // blank seats_booked = 0
       { id: "mc2", seats: 2, booked_after: 5, total: 4, overbooked: true, duplicate: false, calendar: SKIP }, // recorded anyway
@@ -158,7 +161,7 @@ test("blank seats_total (or no column) means unlimited: total null, never overbo
   const text = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", "many", 5]] };
   assert.deepEqual([script(text)({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1 }] }).booked[0].total], [null], "non-numeric cell: unknown");
   const v = script(fresh())({ secret: "S", ids: ["v1"] });
-  assert.deepEqual(v, { ok: true, version: 9, sheet: "Vasi", marked: ["v1"], booked: [], orders: NO_ORDER });
+  assert.deepEqual(v, { ok: true, version: 10, sheet: "Vasi", marked: ["v1"], booked: [], orders: NO_ORDER });
 });
 
 test("limited seats_total above 8 and seats 20 work; seats up to 999 are valid, 1000 is rejected", () => {
@@ -393,22 +396,23 @@ test("calendar: no customer data in Ordini or in the reply", () => {
 
 test("doGet names the deployed contract version and nothing else (no secret, no sheet data)", () => {
   const r = script(fresh(), "TOPSECRET").get();
-  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 9 });
+  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 10 });
 });
 
-// ---- order log (contract v4): private tabs per kind in a SEPARATE spreadsheet, full customer record, consent ----
-const HEAD = ["data_ora", "session_id", "tipo", "nome", "email", "telefono", "marketing_opposizione", "contattabile_marketing", "item_id", "prodotto", "quantita", "persone", "importo_riga", "valuta", "totale_ordine", "fatt_indirizzo", "fatt_cap", "fatt_citta", "fatt_provincia", "fatt_paese", "sped_nome", "sped_indirizzo", "sped_cap", "sped_citta", "sped_provincia", "sped_paese", "lingua", "privacy_accettata", "versione_informativa", "data_consenso", "calendar_event_id"];
+// ---- order log (contract v4): private tabs per kind in a SEPARATE spreadsheet, full customer record, four consents ----
+const HEAD = ["data_ora", "session_id", "tipo", "nome", "email", "telefono", "consenso_email", "consenso_altri_canali", "consenso_terzi", "consenso_ordine", "item_id", "prodotto", "quantita", "persone", "importo_riga", "valuta", "totale_ordine", "fatt_indirizzo", "fatt_cap", "fatt_citta", "fatt_provincia", "fatt_paese", "sped_nome", "sped_indirizzo", "sped_cap", "sped_citta", "sped_provincia", "sped_paese", "lingua", "versione_informativa", "data_consenso", "calendar_event_id"];
 const COL = Object.fromEntries(HEAD.map((h, i) => [h, i]));
 const CUST = {
   email: "ann@example.com", name: "Ann Rossi", phone: "+39 380 632 7838", locale: "it",
   billing: { line1: "Via Roma 1", line2: "int. 4", city: "Genova", postal_code: "16123", state: "GE", country: "IT" },
   shipping: { name: "Ann R.", line1: "Via Po 2", city: "Torino", postal_code: "10100", country: "IT" },
 };
-const CONSENT = { privacy: true, privacy_version: "2026-11", marketing_optout: false, at: "2026-11-04T10:00:00.000Z" };
+const CONSENT = { privacy: true, email_marketing: true, other_channels: false, third_party: false, privacy_version: "2026-11-04", at: "2026-11-04T10:00:00.000Z" };
 const line = (id, kind, o = {}) => ({ id, kind, name: id + " name", quantity: 1, amount_cents: 10000, ...o });
 const ORD = (lines, o = {}) => ({ total_cents: 31000, currency: "eur", created_iso: "2026-11-04T09:59:00.000Z", lines, ...o });
 const send = (call, order, o = {}) => call({ secret: "S", session_id: "cs_ord1", ids: [], bookings: [], customer: CUST, order, consent: CONSENT, ...o });
 const withOrders = (extra = {}) => ({ props: { ORDERS_SPREADSHEET_ID: "ord1" }, others: { ord1: {} }, ...extra }); // an existing separate file
+const TABS3 = ["Ordini_Certificati", "Ordini_Masterclass", "Ordini_Vasi"];
 
 test("order log: one row per line in the private tab of its kind, columns in the agreed order, header bold, frozen and filtered", () => {
   const s = fresh();
@@ -417,15 +421,15 @@ test("order log: one row per line in the private tab of its kind, columns in the
   const r = send(call, ORD([line("v1", "vasi"), line("mc1", "masterclass", { seats: 3, amount_cents: 18000 }), line("gc-50", "certificati", { amount_cents: 5000 })]), { ids: ["v1"] });
   assert.deepEqual(r.orders, { status: "ok", rows: 3 });
   const o = opts.others.ord1;
-  assert.deepEqual(Object.keys(o).sort(), ["Ordini_Certificati", "Ordini_Masterclass", "Ordini_Vasi"]);
+  assert.deepEqual(Object.keys(o).sort(), TABS3);
   assert.deepEqual(o.Ordini_Vasi[0], HEAD);
-  assert.deepEqual(HEAD.slice(0, 8), ["data_ora", "session_id", "tipo", "nome", "email", "telefono", "marketing_opposizione", "contattabile_marketing"]);
+  assert.deepEqual(HEAD.slice(0, 10), ["data_ora", "session_id", "tipo", "nome", "email", "telefono", "consenso_email", "consenso_altri_canali", "consenso_terzi", "consenso_ordine"]);
   assert.deepEqual(o.Ordini_Vasi[1], [
-    "2026-11-04T09:59:00.000Z", "cs_ord1", "vasi", "Ann Rossi", "ann@example.com", "+39 380 632 7838", "NO", "SI",
+    "2026-11-04T09:59:00.000Z", "cs_ord1", "vasi", "Ann Rossi", "ann@example.com", "+39 380 632 7838", "SI", "NO", "NO", "SI",
     "v1", "v1 name", 1, "", 100, "EUR", 310,
     "Via Roma 1, int. 4", "16123", "Genova", "GE", "IT",
     "Ann R.", "Via Po 2", "10100", "Torino", "", "IT",
-    "it", "SI", "2026-11", "2026-11-04T10:00:00.000Z", "",
+    "it", "2026-11-04", "2026-11-04T10:00:00.000Z", "",
   ]);
   assert.deepEqual([o.Ordini_Masterclass[1][COL.quantita], o.Ordini_Masterclass[1][COL.persone], o.Ordini_Masterclass[1][COL.importo_riga]], [1, 3, 180], "persons in persone, euros in importo_riga");
   assert.equal(o.Ordini_Certificati[1][COL.item_id], "gc-50");
@@ -436,21 +440,22 @@ test("order log: one row per line in the private tab of its kind, columns in the
   assert.ok(!Object.keys(s).some((k) => k.startsWith("Ordini_")), "nothing in the bound spreadsheet");
 });
 
-test("order log: marketing opposition is visible: SI/NO, contattabile_marketing, light red cells only for the customers who objected", () => {
+test("order log: four consents as SI/NO; light red when email is refused, light green when other channels or third parties are allowed", () => {
   const opts = withOrders();
   const call = script(fresh(), "S", opts);
-  send(call, ORD([line("v1", "vasi")]), { consent: { ...CONSENT, marketing_optout: true } });
-  send(call, ORD([line("v3", "vasi")]), { session_id: "cs_free" });
-  send(call, ORD([line("v1", "vasi")]), { session_id: "cs_old", consent: undefined });
+  send(call, ORD([line("v1", "vasi")]), { session_id: "cs_a", consent: { ...CONSENT, email_marketing: false } }); // refuses email
+  send(call, ORD([line("v3", "vasi")]), { session_id: "cs_b", consent: { ...CONSENT, other_channels: true, third_party: true } }); // allows everything
+  send(call, ORD([line("v1", "vasi")]), { session_id: "cs_c", consent: undefined }); // old session, nothing recorded
+  send(call, ORD([line("v3", "vasi")]), { session_id: "cs_d", consent: { privacy: true, marketing_optout: false } }); // payload of the previous contract: not objected
   const t = opts.others.ord1.Ordini_Vasi;
-  const flags = (r) => [t[r][COL.marketing_opposizione], t[r][COL.contattabile_marketing], t[r][COL.privacy_accettata]];
-  assert.deepEqual(flags(1), ["SI", "NO", "SI"], "objected: not contactable");
-  assert.deepEqual(flags(2), ["NO", "SI", "SI"], "accepted and did not object: contactable");
-  assert.deepEqual(flags(3), ["NO", "NO", "NO"], "old session, privacy not recorded: not contactable");
+  const flags = (r) => [t[r][COL.consenso_email], t[r][COL.consenso_altri_canali], t[r][COL.consenso_terzi], t[r][COL.consenso_ordine]];
+  assert.deepEqual(flags(1), ["NO", "NO", "NO", "SI"]);
+  assert.deepEqual(flags(2), ["SI", "SI", "SI", "SI"]);
+  assert.deepEqual(flags(3), ["NO", "NO", "NO", "NO"], "nothing recorded: no right, privacy not recorded");
+  assert.deepEqual(flags(4), ["SI", "NO", "NO", "SI"], "marketing_optout false maps to email allowed");
   assert.deepEqual([t[3][COL.versione_informativa], t[3][COL.data_consenso]], ["", ""]);
   const bg = call.meta["ord1:Ordini_Vasi"].backgrounds;
-  assert.deepEqual(Object.keys(bg).sort(), ["2,7", "2,8"], "only the row of the customer who objected, in the two marketing columns");
-  assert.equal(bg["2,7"], "#fde2e2");
+  assert.deepEqual(bg, { "2,7": "#fde2e2", "3,8": "#e2f3e2", "3,9": "#e2f3e2", "4,7": "#fde2e2" });
 });
 
 test("order log: idempotent per (session_id, item_id); a retry reports the same rows and writes nothing; another session adds rows", () => {
@@ -518,29 +523,57 @@ test("separate spreadsheet: without ORDERS_SPREADSHEET_ID one private file is cr
 });
 
 test("separate spreadsheet: created under the script lock and re-checked after it (no second file when another call won the race)", () => {
-  const props = {};
-  const call = script(fresh(), "S", { props });
+  const call = script(fresh(), "S", { props: {} });
   send(call, ORD([line("v1", "vasi")]));
   assert.equal(call.locks.held, 0, "lock released");
   // race: the property appears while the script waits for the lock (another execution created the file first)
   const racing = script(fresh(), "S", { props: {}, others: { winner: {} } });
-  const orig = racing.props;
   let reads = 0;
-  Object.defineProperty(orig, "ORDERS_SPREADSHEET_ID", { configurable: true, get() { reads++; return reads >= 2 ? "winner" : undefined; }, set() {} });
+  Object.defineProperty(racing.props, "ORDERS_SPREADSHEET_ID", { configurable: true, get() { reads++; return reads >= 2 ? "winner" : undefined; }, set() {} });
   const r = send(racing, ORD([line("v1", "vasi")]));
   assert.deepEqual(r.orders, { status: "ok", rows: 1 });
   assert.equal(racing.created.length, 0, "no second file");
 });
 
-test("separate spreadsheet: authorize() creates (or opens) it under its own lock and returns the calendar name", () => {
+test("authorize(): creates the orders file AND its three tabs (header bold, frozen, filtered), removes the empty default sheet, returns the calendar name", () => {
   const a = script(fresh());
   assert.equal(a.authorize(), "Owner");
   assert.deepEqual([a.created.length, a.props.ORDERS_SPREADSHEET_ID, a.locks.taken, a.locks.held], [1, "auto1", 1, 0]);
+  const tabs = a.orderTabs();
+  assert.deepEqual(Object.keys(tabs).sort(), TABS3, "Sheet1 (the empty default) is gone");
+  for (const name of TABS3) {
+    assert.deepEqual(tabs[name], [HEAD], name + ": header row only");
+    const m = a.meta["auto1:" + name];
+    assert.deepEqual([m.frozen, m.bold.length, m.filters.length], [1, 1, 1], name);
+  }
+  // second run: same file, nothing duplicated or reset
+  tabs.Ordini_Vasi.push(["keep"]);
   assert.equal(a.authorize(), "Owner");
-  assert.equal(a.created.length, 1, "second run reuses it");
-  assert.equal(script(fresh(), "S", withOrders()).authorize(), "Owner");
+  assert.equal(a.created.length, 1);
+  assert.deepEqual(tabs.Ordini_Vasi, [HEAD, ["keep"]]);
+  // the first order then simply appends rows (tabs already there)
+  const r = send(a, ORD([line("v1", "vasi")]));
+  assert.deepEqual(r.orders, { status: "ok", rows: 1 });
+  assert.equal(a.meta["auto1:Ordini_Vasi"].filters.length, 1);
+  // an existing file given by the owner works too and keeps its sheets
+  const own = withOrders();
+  own.others.ord1.Notes = [["x"]];
+  own.others.ord1.Sheet1 = [["not empty"]];
+  assert.equal(script(fresh(), "S", own).authorize(), "Owner");
+  assert.deepEqual(Object.keys(own.others.ord1).sort(), ["Notes", ...TABS3, "Sheet1"].sort(), "a non-empty Sheet1 is never deleted");
   assert.throws(() => script(fresh(), "S", { props: { ORDERS_SPREADSHEET_ID: "nope" } }).authorize(), /no access/);
   assert.throws(() => script(fresh(), "S", { failCreate: true }).authorize(), /drive refused/);
+});
+
+test("authorize(): a default sheet is deleted only when it is empty and another sheet exists", () => {
+  const only = withOrders();
+  only.others.ord1.Sheet1 = [];
+  assert.equal(script(fresh(), "S", only).authorize(), "Owner");
+  assert.deepEqual(Object.keys(only.others.ord1).sort(), TABS3, "empty Sheet1 deleted once the three tabs exist");
+  const italian = withOrders();
+  italian.others.ord1.Foglio1 = [];
+  script(fresh(), "S", italian).authorize();
+  assert.ok(!("Foglio1" in italian.others.ord1));
 });
 
 test("separate spreadsheet: unavailable (cannot open or create) fails the log only, never falls back to the bound sheet", () => {
@@ -552,6 +585,24 @@ test("separate spreadsheet: unavailable (cannot open or create) fails the log on
     assert.ok(!Object.keys(s).some((k) => k.startsWith("Ordini_")), "no fallback to the bound spreadsheet");
     assert.equal(s.Vasi[1][1], "si", "marking still done");
   }
+});
+
+test("a tab whose header differs (an older layout) is never written to: orders_layout_outdated, no row anywhere, marking still done", () => {
+  const bad = withOrders();
+  bad.others.ord1.Ordini_Vasi = [["data_ora", "session_id", "tipo", "item_id", "prodotto"]]; // v9 style header
+  const s = fresh();
+  const call = script(s, "S", bad);
+  const r = send(call, ORD([line("v1", "vasi"), line("gc-50", "certificati")]), { ids: ["v1"] });
+  assert.deepEqual([r.ok, r.marked, r.orders], [true, ["v1"], { status: "failed", reason: "orders_layout_outdated", rows: 0 }]);
+  assert.deepEqual(bad.others.ord1.Ordini_Vasi, [["data_ora", "session_id", "tipo", "item_id", "prodotto"]], "left alone");
+  assert.ok(!("Ordini_Certificati" in bad.others.ord1) || bad.others.ord1.Ordini_Certificati.length === 1, "no order row written in the other tab either");
+  assert.equal(s.Vasi[1][1], "si");
+  // after deleting the old tab and running authorize the log works again
+  delete bad.others.ord1.Ordini_Vasi;
+  delete bad.others.ord1.Ordini_Certificati;
+  const again = script(fresh(), "S", bad);
+  again.authorize();
+  assert.deepEqual(send(again, ORD([line("v1", "vasi")])).orders, { status: "ok", rows: 1 });
 });
 
 test("order log: malformed or oversized orders fail the log only; bad lines are dropped (partial); nothing to log is skipped", () => {
@@ -569,18 +620,13 @@ test("order log: malformed or oversized orders fail the log only; bad lines are 
   assert.equal(send(call, ORD([line("v1", "vasi")]), { session_id: "" }).orders.status, "failed");
 });
 
-test("order log: strings are cut to 200 characters; a tab with other headers is not written to", () => {
+test("order log: strings are cut to 200 characters", () => {
   const opts = withOrders();
   const call = script(fresh(), "S", opts);
   send(call, ORD([line("v1", "vasi", { name: "n".repeat(500) })]), { customer: { ...CUST, name: "x".repeat(500) } });
   const t = opts.others.ord1.Ordini_Vasi;
   assert.equal(t[1][COL.prodotto].length, 200);
   assert.equal(t[1][COL.nome].length, 100, "customer name keeps its 100 character cap");
-  const bad = withOrders();
-  bad.others.ord1.Ordini_Vasi = [["something", "else"]];
-  const r = send(script(fresh(), "S", bad), ORD([line("v1", "vasi")]));
-  assert.deepEqual(r.orders, { status: "failed", reason: "write_error", rows: 0 });
-  assert.deepEqual(bad.others.ord1.Ordini_Vasi, [["something", "else"]]);
 });
 
 test("order log: no customer data in the catalogue tabs or in the reply", () => {

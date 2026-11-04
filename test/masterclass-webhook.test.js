@@ -108,9 +108,9 @@ test("unlimited masterclass: reply total null, overbooked false -> no OVERBOOKED
 });
 
 test("a vase-only order sends contract v4: no bookings, but order, extended customer and consent", async () => {
-  const { posts, res } = await run(session({ item_ids: "v3", privacy_accepted: "1", privacy_version: "2026-11", marketing_optout: "1", consent_at: "2026-11-04T10:00:00.000Z" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"], version: 9, orders: { status: "ok", rows: 1 } } });
+  const { posts, res } = await run(session({ item_ids: "v3", privacy_accepted: "1", privacy_version: "2026-11-04", consent_email: "0", consent_channels: "1", consent_third_party: "0", consent_at: "2026-11-04T10:00:00.000Z" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"], version: 9, orders: { status: "ok", rows: 1 } } });
   assert.deepEqual(core(posts[0].body), { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [], customer: CUSTOMER });
-  assert.deepEqual(posts[0].body.consent, { privacy: true, privacy_version: "2026-11", marketing_optout: true, at: "2026-11-04T10:00:00.000Z" });
+  assert.deepEqual(posts[0].body.consent, { privacy: true, email_marketing: false, other_channels: true, third_party: false, privacy_version: "2026-11-04", at: "2026-11-04T10:00:00.000Z" });
   assert.equal(posts[0].body.order.lines.length, 1);
   assert.equal(JSON.parse(res.body).orders, "ok");
 });
