@@ -27,6 +27,11 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
     assert.ok(f.label.custom.length <= 50, `custom_fields label.custom > 50 chars: ${f.label.custom.length}`);
   }
   assertMetadata(params.metadata || {}, "session");
+  if (params.custom_text !== undefined) {
+    const msg = params.custom_text.submit && params.custom_text.submit.message;
+    assert.ok(typeof msg === "string" && msg.length >= 1 && msg.length <= 500, "custom_text.submit.message 1..500 chars");
+    assert.deepEqual(Object.keys(params.custom_text), ["submit"]);
+  }
   assert.ok(Array.isArray(params.line_items) && params.line_items.length >= 1 && params.line_items.length <= 100, "line_items 1..100");
   let physical = false;
   for (const li of params.line_items) {

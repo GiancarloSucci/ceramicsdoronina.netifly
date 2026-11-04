@@ -328,7 +328,7 @@ async function run(type, obj, { markSold, e = wenv } = {}) {
       env: e,
       notify: async (s) => sent.push(s),
       getCatalogue,
-      markSold: markSold || (async (ids) => { marked.push(ids); return { ok: true, marked: ids }; }),
+      markSold: markSold || (async (ids) => { marked.push(ids); return { ok: true, marked: ids, orders: { status: "ok", rows: 1 } }; }),
       markSoldLocal: (ids) => local.push(ids),
     });
     r = await h(req());
@@ -343,7 +343,8 @@ test("paid order marks only unique physical pieces, in order, deduped", async ()
   assert.equal(r.statusCode, 200);
   assert.deepEqual(marked, [["v3", "v1"]]);
   assert.deepEqual(local, [["v3", "v1"]]);
-  assert.ok(!sent[0].includes("ACTION"));
+  assert.ok(!sent[0].includes("ACTION: mark"));
+  assert.equal(JSON.parse(r.body).orders, "partial", "the unknown catalogue id 'unknown' cannot be filed in a tab");
   const [[lvl, o]] = parsed(cap, "sold_marked");
   assert.equal(lvl, "info");
   assert.deepEqual([o.ids, o.session_id, o.event_id], [["v3", "v1"], "cs_1", "evt_1"]);
@@ -363,7 +364,7 @@ test("async_payment_succeeded marks too; unpaid completed / async failed do not"
 test("masterclass, gift cards and multi-piece/digital items never trigger marking", async () => {
   const x = await run("checkout.session.completed", sess("mc1,gc-50,vm,dg"));
   assert.equal(x.r.statusCode, 200);
-  assert.deepEqual([x.marked, x.local], [[], []]);
+  assert.deepEqual([x.marked, x.local], [[[]], []], "nothing is marked, but the order itself is still logged (one call)");
   assert.ok(!x.sent[0].includes("ACTION"));
   assert.equal(parsed(x.cap, "sold_mark_failed").length + parsed(x.cap, "sold_mark_not_configured").length, 0);
 });
@@ -374,7 +375,8 @@ test("mark failure: still 200, local mark kept, warn event, ACTION line for the 
     assert.equal(x.r.statusCode, 200);
     assert.deepEqual(x.local, [["v3", "v1"]]);
     assert.ok(x.sent[0].startsWith("New paid order"));
-    assert.ok(x.sent[0].endsWith("ACTION: mark v3, v1 as sold in the sheet manually"));
+    assert.ok(x.sent[0].includes("\nACTION: mark v3, v1 as sold in the sheet manually"));
+    assert.ok(x.sent[0].endsWith("ACTION: record this order in the orders sheet manually (" + (x.r.body.includes("failed:forbidden") ? "forbidden" : "error") + ")"));
     const [[lvl, o]] = parsed(x.cap, "sold_mark_failed");
     assert.equal(lvl, "warn");
     assert.deepEqual(o.ids, ["v3", "v1"]);
@@ -427,9 +429,11 @@ test("end to end with the real markSold and a fake Apps Script fetch (redirect f
   }
   assert.equal(r.statusCode, 200);
   assert.equal(posts.length, 2);
-  assert.deepEqual(JSON.parse(posts[1][1].body), { secret: SECRET, ids: ["v3"] });
+  const sentBody = JSON.parse(posts[1][1].body);
+  assert.deepEqual([sentBody.secret, sentBody.ids, sentBody.session_id, sentBody.bookings], [SECRET, ["v3"], "cs_1", []]);
+  assert.deepEqual(sentBody.order.lines.map((l) => [l.id, l.kind]), [["v3", "vasi"], ["mc1", "certificati"]]);
   assert.equal(posts[1][1].redirect, "follow");
-  assert.ok(!sent[0].includes("ACTION"));
+  assert.ok(!sent[0].includes("ACTION: mark") && !sent[0].includes("ACTION: add"));
   assert.equal(parsed(cap, "sold_marked").length, 1);
   assert.ok(!cap.logs.some(([, l]) => l.includes(SECRET) || l.includes("AKFY123")), "no secret or script URL token in logs");
   catSrc._reset();

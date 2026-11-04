@@ -680,7 +680,7 @@ async function postOnce(url, payload, fetchImpl, timeoutMs, v2) {
       // An ok reply that does not name the Vasi tab (or, with bookings, is not version 2) comes from an old, not yet redeployed script.
       if (body && body.ok === true) {
         if (body.sheet !== SHEET_NAME || (v2 && !(typeof body.version === "number" && body.version >= 2))) return { ok: false, reason: "script_outdated", retry: false };
-        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked), version: typeof body.version === "number" ? body.version : 1 };
+        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked), version: typeof body.version === "number" ? body.version : 1, orders: cleanOrders(body.orders) };
       }
       if (body && typeof body.error === "string" && /^[a-z_]{1,30}$/.test(body.error)) return { ok: false, reason: body.error, retry: false };
       return { ok: false, reason: res.ok ? "rejected" : "http_" + res.status, retry: !res.ok && res.status >= 500 };
@@ -714,13 +714,75 @@ function cleanCalendar(c) {
   return out;
 }
 
+// {status, reason?, rows} of the script's `orders` field (contract v4); null when absent (an older script) or malformed.
+function cleanOrders(o) {
+  if (!o || typeof o !== "object" || !["ok", "skipped", "failed"].includes(o.status)) return null;
+  const out = { status: o.status, rows: Number.isInteger(o.rows) && o.rows >= 0 ? o.rows : 0 };
+  if (typeof o.reason === "string" && /^[a-z_,]{1,60}$/.test(o.reason)) out.reason = o.reason;
+  return out;
+}
+
+const FIELD_MAX = 200;
+const MAX_ORDER_LINES = 50;
+const LINE_KINDS = ["vasi", "masterclass", "certificati"];
+const cleanStr = (v, max = FIELD_MAX) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+
+// Address object {line1,line2,city,postal_code,state,country[,name]}: only non-empty strings, each <= 200 chars; null when empty.
+function cleanAddress(a, withName) {
+  if (!a || typeof a !== "object") return null;
+  const out = {};
+  for (const k of withName ? ["name", "line1", "line2", "city", "postal_code", "state", "country"] : ["line1", "line2", "city", "postal_code", "state", "country"]) {
+    const v = cleanStr(a[k]);
+    if (v) out[k] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// Customer of contract v4: {email, name, phone, locale, billing, shipping}; empty fields are omitted. null when nothing is left.
+function cleanCustomerV4(c) {
+  if (!c || typeof c !== "object") return null;
+  const out = {};
+  for (const k of ["email", "name", "phone"]) {
+    const v = cleanStr(c[k], k === "email" ? 254 : FIELD_MAX);
+    if (v) out[k] = v;
+  }
+  const billing = cleanAddress(c.billing, false);
+  const shipping = cleanAddress(c.shipping, true);
+  if (billing) out.billing = billing;
+  if (shipping) out.shipping = shipping;
+  if (!Object.keys(out).length) return null;
+  out.locale = ["it", "en", "ru"].includes(c.locale) ? c.locale : "it";
+  return out;
+}
+
+// Order of contract v4: {total_cents, currency, created_iso, lines:[{id, kind, name, quantity, seats?, amount_cents}]}; at most 50 valid lines.
+function cleanOrder(o) {
+  if (!o || typeof o !== "object") return null;
+  const int = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+  const lines = (Array.isArray(o.lines) ? o.lines : [])
+    .filter((l) => l && typeof l === "object" && ID_RE.test(String(l.id)) && LINE_KINDS.includes(l.kind))
+    .slice(0, MAX_ORDER_LINES)
+    .map((l) => {
+      const e = { id: String(l.id), kind: l.kind, name: cleanStr(l.name), quantity: Math.max(1, int(l.quantity)), amount_cents: int(l.amount_cents) };
+      if (Number.isInteger(l.seats) && l.seats >= 1 && l.seats <= MAX_PERSONS) e.seats = l.seats;
+      return e;
+    });
+  return { total_cents: int(o.total_cents), currency: cleanStr(o.currency, 10).toLowerCase(), created_iso: cleanStr(o.created_iso, 40), lines };
+}
+
+// Consent record of contract v4: {privacy, privacy_version, marketing_optout, at}.
+function cleanConsent(c) {
+  c = c && typeof c === "object" ? c : {};
+  return { privacy: c.privacy === true, privacy_version: cleanStr(c.privacy_version, 40), marketing_optout: c.marketing_optout === true, at: cleanStr(c.at, 40) };
+}
+
 // Marks ids as sold and books masterclass seats ({id, seats} in `bookings`, with the Stripe
 // `sessionId` for idempotency) in the sheet, in ONE call. `customer` ({email, name, locale}) rides along
 // with the bookings only, for the calendar invitation; it is never logged. Never throws. Resolves
 //   {ok:true, marked[, booked]}  |  {ok:false, reason}  (reason "not_configured" when env is unset,
 //   "script_outdated" when an ok reply does not name the Vasi tab or, with bookings, is older than version 2)
 // Retries (up to 2, short backoff) only on network errors, timeouts, 5xx and non-JSON answers.
-async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, sleep = defaultSleep, timeoutMs = FETCH_TIMEOUT_MS, bookings, sessionId, customer } = {}) {
+async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, sleep = defaultSleep, timeoutMs = FETCH_TIMEOUT_MS, bookings, sessionId, customer, order, consent } = {}) {
   const secret = env && env.CATALOGUE_WRITE_SECRET;
   const chk = checkUrl(env && env.CATALOGUE_WRITE_URL, WRITE_HOST);
   if (!chk.url || !secret) {
@@ -731,8 +793,20 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
   if (!fetchImpl) return { ok: false, reason: "no_fetch" };
   const book = (bookings || []).filter((b) => b && ID_RE.test(String(b.id)) && Number.isInteger(b.seats) && b.seats >= 1 && b.seats <= MAX_PERSONS).map((b) => ({ id: String(b.id), seats: b.seats }));
   // Contract v2 adds session_id and bookings (v3 customer); with ids only the payload is the one of the first version.
-  const body = book.length ? { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book } : { secret, ids: [...ids] };
-  if (book.length && customer && (customer.email || customer.name)) body.customer = { email: String(customer.email || ""), name: String(customer.name || ""), locale: ["it", "en", "ru"].includes(customer.locale) ? customer.locale : "it" };
+  // Contract v4 (`order` given, one POST per paid session): also session_id, the extended customer, the order lines and the
+  // consent record, so the script can log the order in its private tabs even when nothing is marked or booked.
+  const cleanedOrder = order ? cleanOrder(order) : null;
+  let body;
+  if (cleanedOrder) {
+    body = { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book };
+    const cust = cleanCustomerV4(customer);
+    if (cust) body.customer = cust;
+    body.order = cleanedOrder;
+    body.consent = cleanConsent(consent);
+  } else {
+    body = book.length ? { secret, session_id: String(sessionId || ""), ids: [...ids], bookings: book } : { secret, ids: [...ids] };
+    if (book.length && customer && (customer.email || customer.name)) body.customer = { email: String(customer.email || ""), name: String(customer.name || ""), locale: ["it", "en", "ru"].includes(customer.locale) ? customer.locale : "it" };
+  }
   const payload = JSON.stringify(body);
   let last = { ok: false, reason: "network" };
   for (let attempt = 0; attempt <= WRITE_RETRIES; attempt++) {
@@ -741,7 +815,9 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
     if (attempt < WRITE_RETRIES) await sleep(WRITE_BACKOFF_MS * (attempt + 1));
   }
   if (!last.ok) return { ok: false, reason: last.reason };
-  return book.length ? { ok: true, marked: last.marked, booked: last.booked, version: last.version } : { ok: true, marked: last.marked, version: last.version };
+  const res = book.length ? { ok: true, marked: last.marked, booked: last.booked, version: last.version } : { ok: true, marked: last.marked, version: last.version };
+  if (cleanedOrder) res.orders = last.orders; // null = the script did not answer `orders` (older than version 9)
+  return res;
 }
 
 module.exports = {

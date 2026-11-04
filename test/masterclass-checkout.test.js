@@ -33,7 +33,7 @@ function setup(over = {}) {
   const handler = makeHandler({ stripeFactory: () => fake.client, env, getCatalogue, now: () => NOW });
   return { ...fake, handler };
 }
-const post = (body) => ({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify(body) });
+const post = (body) => ({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify(body && typeof body === "object" && !("consents" in body) ? { ...body, consents: { privacy: true, marketing_optout: false } } : body) });
 const body = (r) => JSON.parse(r.body);
 const mc = (id, quantity) => ({ items: [{ id, quantity }], locale: "it" });
 const logsOf = async (fn) => {

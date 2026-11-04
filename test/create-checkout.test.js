@@ -24,10 +24,12 @@ function setup(over = {}) {
   const handler = makeHandler({ stripeFactory: () => fake, env, catalogue, soldList: ["vm"], now: () => 1_000_000_000_000 });
   return { calls, handler };
 }
+// Object bodies get the consents of a customer who accepted the privacy notice, unless the test sets `consents` itself.
+const withConsents = (body) => (body && typeof body === "object" && !Array.isArray(body) && !("consents" in body) ? { ...body, consents: { privacy: true, marketing_optout: false } } : body);
 const post = (body, o = {}) => ({
   httpMethod: "POST",
   headers: o.headers || { origin: ORIGIN },
-  body: typeof body === "string" || body === undefined ? body : JSON.stringify(body),
+  body: typeof body === "string" || body === undefined ? body : JSON.stringify(withConsents(body)),
 });
 const ship = (p) => p.shipping_options?.[0]?.shipping_rate_data.fixed_amount.amount;
 
@@ -109,7 +111,7 @@ test("400 table: exact error codes and item_id", async () => {
     [[], "invalid_body", undefined],
   ];
   for (const [b, code, itemId] of bad) {
-    const r = await handler(post(JSON.stringify(b)));
+    const r = await handler(post(JSON.stringify(withConsents(b))));
     assert.equal(r.statusCode, 400, JSON.stringify(b)?.slice(0, 60));
     const body = JSON.parse(r.body);
     assert.equal(body.error, code, JSON.stringify(b)?.slice(0, 60));
@@ -128,7 +130,7 @@ test("400 table: exact error codes and item_id", async () => {
 
 test("base64 POST body and 30 distinct items accepted", async () => {
   const { handler, calls } = setup();
-  const body = JSON.stringify({ items: [{ id: "v1", quantity: 1 }], locale: "ru" });
+  const body = JSON.stringify({ items: [{ id: "v1", quantity: 1 }], locale: "ru", consents: { privacy: true } });
   const r = await handler({ httpMethod: "POST", headers: { origin: ORIGIN }, isBase64Encoded: true, body: Buffer.from(body, "utf8").toString("base64") });
   assert.equal(r.statusCode, 200);
   assert.equal(calls[0].locale, "ru");
@@ -236,7 +238,7 @@ test("session params: expires_at, locale, label, metadata, flags", async () => {
 test("locale picks product name", () => {
   const li = buildLineItems([{ id: "v1", quantity: 1 }], catalogue, "https://s.it", "en");
   assert.equal(li[0].price_data.product_data.name, "Vase");
-  assert.throws(() => validateBody({ items: [{ id: "zz", quantity: 1 }] }, catalogue, []), { name: "ValidationError" });
+  assert.throws(() => validateBody(withConsents({ items: [{ id: "zz", quantity: 1 }] }), catalogue, []), { name: "ValidationError" });
 });
 
 // ---- R-006 / R-013 additions ----
@@ -266,7 +268,7 @@ test("shipping display_name is localised", async () => {
 });
 
 test("buildSessionParams called directly: pure, validates locale via validateBody", () => {
-  const { items, locale } = validateBody({ items: [{ id: "v1", quantity: 1 }], locale: "xx" }, catalogue, []);
+  const { items, locale } = validateBody(withConsents({ items: [{ id: "v1", quantity: 1 }], locale: "xx" }), catalogue, []);
   assert.equal(locale, null);
   const out = buildSessionParams({ items, locale: "en", catalogue, siteUrl: "https://s.it", now: () => 5_000_000 });
   assert.equal(out.params.locale, "en");
@@ -424,4 +426,91 @@ test("live catalogue: sheet unreachable falls back to the snapshot (checkout kee
     console.warn = orig;
     src._reset();
   }
+});
+
+// ---- consents (privacy notice accepted, marketing opt-out) ----
+const mdOf = (calls) => calls[0].metadata;
+
+test("consents: privacy must be exactly true; otherwise 400 privacy_required, before any Stripe call", async () => {
+  const { handler, calls } = setup();
+  const items = [{ id: "v1", quantity: 1 }];
+  for (const consents of [undefined, null, {}, { privacy: false }, { privacy: "true" }, { privacy: 1 }, { marketing_optout: true }, [], "yes", [true]]) {
+    const body = consents === undefined ? { items, consents: undefined } : { items, consents };
+    const r = await handler(post(body));
+    assert.equal(r.statusCode, 400, JSON.stringify(consents));
+    assert.equal(JSON.parse(r.body).error, "privacy_required", JSON.stringify(consents));
+    assert.ok(r.headers["Access-Control-Allow-Origin"]);
+  }
+  assert.equal((await handler(post({ items }))).statusCode, 200, "the helper adds the consents when the test does not");
+  const none = await handler({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items }) });
+  assert.equal(JSON.parse(none.body).error, "privacy_required", "a body without consents at all");
+  assert.equal(calls.length, 1, "only the accepted request reached Stripe");
+});
+
+test("consents: privacy_required is decided before the seat-holds lookup (no Stripe list call)", async () => {
+  const { client: fake, calls } = makeStripeFake({ catalogue, now: () => 1_000_000_000_000 });
+  let listed = 0;
+  const stripe = { checkout: { sessions: { create: fake.checkout.sessions.create, list: async () => { listed++; return { data: [] }; } } } };
+  const cat = { ...catalogue, mcx: { type: "digital", name_it: "MCX", priceCents: 10000, tiersCents: [10000, 18000], pricing: "table", seatsTotal: 8, seatsBooked: 0, seatsFree: 8, sold: false, image: "", maxQty: 2 } };
+  const h = makeHandler({ stripeFactory: () => stripe, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: cat, soldList: [], now: () => 1_000_000_000_000 });
+  const r = await h(post({ items: [{ id: "mcx", quantity: 1 }], consents: { privacy: false } }));
+  assert.equal(JSON.parse(r.body).error, "privacy_required");
+  assert.equal(listed, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("consents: marketing_optout must be a boolean when present (invalid_consents); absent means false", async () => {
+  const { handler, calls } = setup();
+  const items = [{ id: "v1", quantity: 1 }];
+  for (const marketing_optout of ["yes", 1, 0, null, "true", {}, []]) {
+    const r = await handler(post({ items, consents: { privacy: true, marketing_optout } }));
+    assert.equal(r.statusCode, 400, JSON.stringify(marketing_optout));
+    assert.equal(JSON.parse(r.body).error, "invalid_consents", JSON.stringify(marketing_optout));
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await handler(post({ items, consents: { privacy: true } }))).statusCode, 200);
+  assert.equal(mdOf(calls).marketing_optout, "0");
+});
+
+test("consents: validateBody returns {privacy, marketing_optout}; errors are ValidationError with the code", () => {
+  const ok = validateBody({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, marketing_optout: true } }, catalogue, []);
+  assert.deepEqual(ok.consents, { privacy: true, marketing_optout: true });
+  for (const [consents, code] of [[undefined, "privacy_required"], [{ privacy: false }, "privacy_required"], [{ privacy: true, marketing_optout: "x" }, "invalid_consents"]]) {
+    assert.throws(() => validateBody({ items: [{ id: "v1", quantity: 1 }], consents }, catalogue, []), { name: "ValidationError", code });
+  }
+});
+
+test("consent metadata on the session: privacy_accepted, notice version, opt-out, timestamp, and no personal data", async () => {
+  let { handler, calls } = setup();
+  await handler(post({ items: [{ id: "v1", quantity: 1 }], consents: { privacy: true, marketing_optout: true } }));
+  assert.deepEqual(mdOf(calls), { item_ids: "v1", privacy_accepted: "1", privacy_version: "2026-11", marketing_optout: "1", consent_at: "2001-09-09T01:46:40.000Z" });
+  ({ handler, calls } = setup({ env: { PRIVACY_POLICY_VERSION: "2027-02" } }));
+  await handler(post({ items: [{ id: "v1", quantity: 1 }, { id: "mc1", quantity: 2 }] }));
+  assert.equal(mdOf(calls).privacy_version, "2027-02");
+  assert.equal(mdOf(calls).marketing_optout, "0");
+  assert.equal(mdOf(calls).item_ids, "v1,mc1", "existing metadata is intact");
+  for (const bad of ["", "has space", "x".repeat(41), "a/b", "<b>"]) {
+    ({ handler, calls } = setup({ env: { PRIVACY_POLICY_VERSION: bad } }));
+    await handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+    assert.equal(mdOf(calls).privacy_version, "2026-11", "invalid PRIVACY_POLICY_VERSION falls back: " + bad);
+  }
+  assert.ok(!JSON.stringify(mdOf(calls)).match(/@|mail|name|phone/i));
+});
+
+test("custom_text under the pay button: privacy notice line in it/en/ru with the privacy page of that language, <= 500 chars", async () => {
+  const pages = { it: "privacy-policy.html", en: "privacy-policy.en.html", ru: "privacy-policy.ru.html" };
+  for (const [loc, word, page] of [["it", "informativa privacy", pages.it], ["en", "privacy notice", pages.en], ["ru", "конфиденциальности", pages.ru], [undefined, "informativa privacy", pages.it], ["xx", "informativa privacy", pages.it]]) {
+    const { handler, calls } = setup({ env: { SITE_URL: "https://ceramicsdoronina.it/" } });
+    await handler(post({ items: [{ id: "v1", quantity: 1 }], locale: loc }));
+    const msg = calls[0].custom_text.submit.message;
+    assert.ok(msg.includes(word) && msg.endsWith("https://ceramicsdoronina.it/" + page) && msg.length <= 500, `${loc}: ${msg}`);
+    // no other language's page in the message (privacy-policy.html is a prefix of nothing else, so check the endings)
+    for (const other of Object.values(pages)) if (other !== page) assert.ok(!msg.includes("/" + other), `${loc} must not link ${other}`);
+  }
+});
+
+test("buildSessionParams without consents (direct call) adds no consent metadata and no custom_text", () => {
+  const out = buildSessionParams({ items: [{ id: "v1", quantity: 1 }], locale: "it", catalogue, siteUrl: "https://s.it", now: () => 5_000_000 });
+  assert.deepEqual(out.params.metadata, { item_ids: "v1" });
+  assert.equal(out.params.custom_text, undefined);
 });

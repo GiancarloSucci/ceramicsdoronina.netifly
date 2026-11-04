@@ -14,6 +14,13 @@
 // a missing, failed or skipped event becomes an ACTION line for the owner and calendar: "partial" in the 200 answer. Marking problems never change the 200 answer to Stripe:
 // the owner is told to mark by hand. Booked seats also count locally for 15 minutes (per session id, so
 // Stripe retries never count twice), until the published CSV catches up.
+// Contract v4 (script version 9): the same ONE POST of every paid session also carries `order` ({total_cents, currency,
+// created_iso, lines:[{id, kind: vasi|masterclass|certificati, name, quantity, seats?, amount_cents}]}), the extended
+// `customer` (phone, billing and shipping address) and `consent` (privacy accepted + notice version, marketing opt-out,
+// from the session metadata). The script logs one row per line in its PRIVATE tabs Ordini_Vasi / Ordini_Masterclass /
+// Ordini_Certificati and replies `orders:{status, reason?, rows}`; the 200 answer shows it as `orders`
+// (ok | partial | none | failed:<code>). Even a session with nothing to mark or book (e.g. only gift certificates)
+// makes that call. Customer data goes only into that POST: never into logs, the 200 answer or the owner chat message.
 // Idempotency: stateless. Stripe may retry/duplicate deliveries (same event.id);
 // the notification is informational only, so a duplicate is harmless. event.id is logged
 // so duplicates can be spotted. Customer PII (name, email, phone, address, note) is never
@@ -32,6 +39,8 @@ const NOTE_MAX = 500;
 const NOTIFY_TIMEOUT_MS = 5000;
 // Netlify sync functions stop at 10 s: marking (3 attempts x 5 s worst case) must not starve the owner notification.
 const MARK_DEADLINE_MS = 4000;
+const ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const MAX_ORDER_LINES = 50;
 
 // Neutralises chat-markup injection in customer-controlled text: escapes & < >
 // (so "<!channel>", "<http://..|x>" and "<@U1>" cannot form links or mentions) and
@@ -135,6 +144,96 @@ function uniquePieceIds(itemIds, items) {
   return [...new Set(ids)].filter((id) => Object.prototype.hasOwnProperty.call(items, id) && items[id].type === "physical" && items[id].maxQty === 1);
 }
 
+const str = (v, max = FIELD_MAX) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+
+function addressFields(a) {
+  const out = {};
+  if (a && typeof a === "object") for (const k of ["line1", "line2", "city", "postal_code", "state", "country"]) if (str(a[k])) out[k] = str(a[k]);
+  return out;
+}
+
+// Customer of the order POST: email, name, phone, billing and shipping address (everything Stripe collected).
+function buildCustomer(sess) {
+  const cd = sess.customer_details || {};
+  const sd = sess.shipping_details || sess.collected_information?.shipping_details || null;
+  const c = {};
+  if (str(cd.email, 254)) c.email = str(cd.email, 254);
+  if (str(cd.name)) c.name = str(cd.name);
+  if (str(cd.phone)) c.phone = str(cd.phone);
+  const billing = addressFields(cd.address);
+  if (Object.keys(billing).length) c.billing = billing;
+  if (sd && sd.address) {
+    const shipping = { ...(str(sd.name) ? { name: str(sd.name) } : {}), ...addressFields(sd.address) };
+    if (Object.keys(shipping).length) c.shipping = shipping;
+  }
+  if (Object.keys(c).length) c.locale = ["it", "en", "ru"].includes(sess.locale) ? sess.locale : "it";
+  return c;
+}
+
+// Consent evidence copied from the session metadata written by create-checkout (old sessions have none: privacy false).
+function buildConsent(sess) {
+  const md = (sess && sess.metadata) || {};
+  return { privacy: md.privacy_accepted === "1", privacy_version: str(md.privacy_version, 40), marketing_optout: md.marketing_optout === "1", at: str(md.consent_at, 40) };
+}
+
+function lineKind(item) {
+  if (!item) return null;
+  if (item.type === "physical") return "vasi";
+  return Array.isArray(item.tiersCents) ? "masterclass" : "certificati";
+}
+
+// Lines of the order for the private tabs. Ids come from the Stripe product metadata (listLineItems expanded) or, when
+// that is missing, from the session's item_ids when the counts match; with no Stripe lines at all the lines are
+// rebuilt from item_ids/bookings and the catalogue. `skipped` counts lines whose catalogue kind is unknown.
+function buildOrder(sess, lineItems, itemIds, bookings, items) {
+  const ids = String(itemIds || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const seatsById = new Map(bookings.map((b) => [b.id, b.seats]));
+  const lines = [];
+  let skipped = 0;
+  const push = (id, name, quantity, amount) => {
+    const item = items && Object.prototype.hasOwnProperty.call(items, id) ? items[id] : null;
+    const kind = lineKind(item) || (seatsById.has(id) ? "masterclass" : null);
+    if (!ID_RE.test(id) || !kind || lines.length >= MAX_ORDER_LINES) {
+      skipped++;
+      return;
+    }
+    const line = { id, kind, name: str(name) || str(item && (item.name_it || item.name)) || id, quantity: Number.isInteger(quantity) && quantity >= 1 ? quantity : 1, amount_cents: Number.isInteger(amount) && amount >= 0 ? amount : 0 };
+    if (kind === "masterclass" && seatsById.has(id)) {
+      line.seats = seatsById.get(id);
+      line.quantity = 1;
+    }
+    lines.push(line);
+  };
+  if (lineItems.length) {
+    const positional = lineItems.length === ids.length;
+    lineItems.forEach((li, i) => {
+      const prod = li && li.price && typeof li.price.product === "object" && li.price.product ? li.price.product : null;
+      const fromProduct = prod && prod.metadata && typeof prod.metadata.item_id === "string" ? prod.metadata.item_id : "";
+      const id = fromProduct || (positional ? ids[i] : "");
+      push(id, (li && (li.description || (prod && prod.name))) || "", li && li.quantity, li && (Number.isInteger(li.amount_total) ? li.amount_total : li.amount_subtotal));
+    });
+  }
+  if (!lines.length && ids.length) {
+    // no Stripe lines, or none could be tied to a catalogue id: rebuild the lines from item_ids and the catalogue
+    skipped = 0;
+    for (const id of ids) {
+      const item = items && Object.prototype.hasOwnProperty.call(items, id) ? items[id] : null;
+      const amount = item && Number.isInteger(item.priceCents) && !seatsById.has(id) ? item.priceCents : 0;
+      push(id, "", 1, amount);
+    }
+  }
+  const created = typeof sess.created === "number" ? new Date(sess.created * 1000) : new Date();
+  return {
+    order: {
+      total_cents: Number.isInteger(sess.amount_total) && sess.amount_total >= 0 ? sess.amount_total : 0,
+      currency: str(String(sess.currency || "eur"), 10).toLowerCase(),
+      created_iso: created.toISOString(),
+      lines,
+    },
+    skipped,
+  };
+}
+
 function makeHandler({
   stripeFactory = defaultStripeFactory,
   env = process.env,
@@ -188,7 +287,7 @@ function makeHandler({
     try {
       let lineItems = [];
       try {
-        const list = await stripe.checkout.sessions.listLineItems(session.id, { limit: 100 });
+        const list = await stripe.checkout.sessions.listLineItems(session.id, { limit: 100, expand: ["data.price.product"] });
         lineItems = list.data || [];
       } catch (_) {
         log("warn", { event: "list_line_items_failed", session_id: session.id });
@@ -200,6 +299,7 @@ function makeHandler({
       let sheetOutcome; // shown in Stripe's delivery log: ok | nothing_to_record | failed:<reason>
       let calendarOutcome = "none"; // ok | partial | none (nothing to book, or no customer email)
       let scriptVersion; // contract version the deployed Apps Script answered with (1 = no version field, an old script)
+      let ordersOutcome = "none"; // ok | partial | none (nothing to log, or not configured) | failed:<code>
       const calendarIssues = []; // "<id>:<reason>" per booking without an event, shown in Stripe's delivery log (ids and fixed reasons only)
       const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
@@ -207,12 +307,13 @@ function makeHandler({
         const bookings = parseBookings(sess.metadata && sess.metadata.bookings);
         const book = bookings.map((b) => `${b.id}:${b.seats}`);
         const lines = [];
-        const cd = sess.customer_details || {};
-        const customer = {};
-        if (cd.email) customer.email = String(cd.email);
-        if (cd.name) customer.name = String(cd.name);
+        const customer = buildCustomer(sess);
         const hasCustomer = Boolean(customer.email);
-        if (customer.email || customer.name) customer.locale = ["it", "en", "ru"].includes(sess.locale) ? sess.locale : "it";
+        let order = null; // {order, skipped}: the order POSTed for the private tabs
+        const ordersAction = (why) => {
+          ordersOutcome = `failed:${safeText(why, 40)}`;
+          return `ACTION: record this order in the orders sheet manually (${clean(why, 60)})`;
+        };
         const calendarLine = (id, reason) => {
           calendarIssues.push(`${clean(id, 40)}:${clean(reason, 60)}`);
           return `ACTION: create the calendar event for ${clean(id, 40)} manually (${clean(reason, 60)})`;
@@ -226,6 +327,7 @@ function makeHandler({
             calendarOutcome = "partial";
             for (const b of bookings) out.push(calendarLine(b.id, why === "script_outdated" ? "Apps Script needs updating" : "sheet update failed"));
           }
+          if (order && order.order.lines.length && why !== "not_configured") out.push(ordersAction(why)); // not_configured: the order log is simply off
           return out;
         };
         const localEffects = () => {
@@ -234,23 +336,30 @@ function makeHandler({
           localDone = true;
         };
         try {
-          if (ids) {
-            const { items } = await getCatalogue({ fetchImpl, env });
-            pieces = uniquePieceIds(ids, items);
-          }
-          if (!pieces.length && !bookings.length) {
-            sheetOutcome = "nothing_to_record";
-            return "";
-          }
-          localEffects();
+          let items = null;
+          if (ids || bookings.length) ({ items } = await getCatalogue({ fetchImpl, env }));
+          if (ids) pieces = uniquePieceIds(ids, items);
+          order = buildOrder(sess, lineItems, ids, bookings, items);
+          const hasWork = pieces.length > 0 || bookings.length > 0;
+          const hasOrder = order.order.lines.length > 0;
+          if (!hasWork) sheetOutcome = "nothing_to_record";
+          if (!hasWork && !hasOrder) return "";
+          if (hasWork) localEffects();
           let timer;
           const deadline = new Promise((resolve) => {
             timer = setTimeout(() => resolve({ ok: false, reason: "deadline" }), MARK_DEADLINE_MS);
           });
-          const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id, customer }), deadline]).finally(() => clearTimeout(timer));
+          const r = await Promise.race([markSold(pieces, { fetchImpl, env, bookings, sessionId: sess.id, customer, order: order.order, consent: buildConsent(sess) }), deadline]).finally(() => clearTimeout(timer));
           if (r && r.ok) {
-            sheetOutcome = "ok";
+            if (hasWork) sheetOutcome = "ok";
             scriptVersion = r.version;
+            if (hasOrder) {
+              const o = r.orders;
+              if (!o) lines.push(ordersAction("script_outdated"));
+              else if (o.status === "ok") ordersOutcome = o.reason === "partial" || order.skipped ? "partial" : "ok";
+              else lines.push(ordersAction(o.reason || o.status));
+              if (ordersOutcome === "partial") lines.push("ACTION: some order lines are missing in the orders sheet, check it manually");
+            }
             if (hasCustomer && bookings.length) calendarOutcome = "ok"; // downgraded to partial below
             if (pieces.length) log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
             if (bookings.length) {
@@ -284,6 +393,12 @@ function makeHandler({
             return lines.join("\n");
           }
           const reason = (r && r.reason) || "unknown";
+          if (!hasWork) {
+            // nothing to mark or book: only the order log failed (not_configured = the feature is simply off)
+            if (reason === "not_configured") return "";
+            log("warn", { event: "orders_log_failed", session_id: sess.id, event_id: evt.id, reason: safeText(reason, 60) });
+            return ordersAction(reason);
+          }
           sheetOutcome = `failed:${safeText(reason, 40)}`;
           if (reason === "not_configured") log("warn", { event: "sold_mark_not_configured", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book });
           else log("warn", { event: "sold_mark_failed", session_id: sess.id, event_id: evt.id, ids: pieces, bookings: book, reason: safeText(reason, 60) });
@@ -323,7 +438,7 @@ function makeHandler({
       const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
-      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome, ...(scriptVersion ? { script_version: scriptVersion } : {}), ...(calendarIssues.length ? { calendar_issues: calendarIssues } : {}) } : { received: true });
+      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome, orders: ordersOutcome, ...(scriptVersion ? { script_version: scriptVersion } : {}), ...(calendarIssues.length ? { calendar_issues: calendarIssues } : {}) } : { received: true });
     } catch (err) {
       const out = { event: "webhook_processing_failed", event_id: stripeEvent.id, session_id: session.id, name: err && err.name };
       if (err && err.name === "NotifyFetchError") out.code = err.code; // never the URL
@@ -340,3 +455,6 @@ exports.buildOrderSummary = buildOrderSummary;
 exports.notifyOwner = notifyOwner;
 exports.clean = clean;
 exports.uniquePieceIds = uniquePieceIds;
+exports.buildOrder = buildOrder;
+exports.buildCustomer = buildCustomer;
+exports.buildConsent = buildConsent;

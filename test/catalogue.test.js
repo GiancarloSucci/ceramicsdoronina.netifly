@@ -124,7 +124,7 @@ test("contract: every catalogue id x locales (incl. invalid) builds a valid Stri
     for (const id of Object.keys(unsold)) {
       const f = makeStripeFake({ catalogue: unsold, now });
       const h = makeHandler({ stripeFactory: () => f.client, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: unsold, soldList: [], now: () => now });
-      const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items: [{ id, quantity: 1 }], locale }) });
+      const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items: [{ id, quantity: 1 }], locale, consents: { privacy: true, marketing_optout: false } }) });
       assert.equal(r.statusCode, 200, `${id} ${locale}: ${r.body}`);
       assert.equal(f.calls.length, 1);
     }
@@ -133,7 +133,7 @@ test("contract: every catalogue id x locales (incl. invalid) builds a valid Stri
   const f = makeStripeFake({ catalogue: unsold, now });
   const h = makeHandler({ stripeFactory: () => f.client, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" }, catalogue: unsold, soldList: [], now: () => now });
   const items = Object.keys(unsold).map((id) => ({ id, quantity: 1 }));
-  const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items, locale: "it" }) });
+  const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items, locale: "it", consents: { privacy: true } }) });
   assert.equal(r.statusCode, 200, r.body);
   assert.equal(f.calls[0].line_items.length, items.length);
 });
@@ -144,7 +144,7 @@ test("contract: real sold ids are rejected with item_sold + item_id", async () =
   const h = makeHandler({ stripeFactory: () => { throw new Error("must not be called"); }, env: { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_x" } });
   const sold = [...Object.keys(catalogue).filter((id) => catalogue[id].sold), ...soldJson];
   for (const id of sold) {
-    const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items: [{ id, quantity: 1 }] }) });
+    const r = await h({ httpMethod: "POST", headers: { origin: ORIGIN }, body: JSON.stringify({ items: [{ id, quantity: 1 }], consents: { privacy: true } }) });
     assert.equal(r.statusCode, 400);
     assert.deepEqual([JSON.parse(r.body).error, JSON.parse(r.body).item_id], ["item_sold", id]);
   }

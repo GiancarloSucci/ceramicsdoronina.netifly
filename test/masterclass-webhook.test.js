@@ -61,15 +61,17 @@ async function run(obj, { reply, type, overrides = {} } = {}) {
   }
   return { res, posts, sent, cap };
 }
-const ok = (booked, marked = []) => ({ ok: true, version: 3, sheet: "Vasi", marked, booked });
+const ok = (booked, marked = []) => ({ ok: true, version: 3, sheet: "Vasi", marked, booked, orders: { status: "ok", rows: 1 } });
 const entry = (id, seats, o = {}) => ({ id, seats, booked_after: seats, total: 8, overbooked: false, duplicate: false, calendar: { status: "created" }, ...o });
-const CUSTOMER = { email: "a@b.it", name: "Ann", locale: "it" };
+const CUSTOMER = { email: "a@b.it", name: "Ann", phone: "+39", billing: { country: "IT" }, locale: "it" }; // contract v4: everything Stripe collected
+// body of the POST without the order log fields (order, consent): the calendar/seats part of the contract
+const core = (b) => { const { order, consent, ...rest } = b; return rest; };
 
 test("paid order: ONE combined call {secret, session_id, ids, bookings}; owner sees persons", async () => {
   const { res, posts, sent, cap } = await run(session({ item_ids: "v3,mc1,mc3", bookings: "mc1:2,mc3:1" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)], ["v3"]) });
   assert.equal(res.statusCode, 200);
   assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0].body, { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc3", seats: 1 }], customer: CUSTOMER });
+  assert.deepEqual(core(posts[0].body), { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc3", seats: 1 }], customer: CUSTOMER });
   assert.ok(sent[0].startsWith("New paid order"));
   assert.ok(sent[0].includes("Masterclass persons: mc1 x 2; mc3 x 1"));
   assert.ok(sent[0].includes("1 x Corso (2 persone)"));
@@ -80,7 +82,7 @@ test("paid order: ONE combined call {secret, session_id, ids, bookings}; owner s
 
 test("bookings only (no vase): ids is empty, still one call", async () => {
   const { posts, sent } = await run(session({ item_ids: "mc1", bookings: "mc1:8" }), { reply: ok([entry("mc1", 8)]) });
-  assert.deepEqual(posts.map((p) => p.body), [{ secret: SECRET, session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 8 }], customer: CUSTOMER }]);
+  assert.deepEqual(posts.map((p) => core(p.body)), [{ secret: SECRET, session_id: "cs_1", ids: [], bookings: [{ id: "mc1", seats: 8 }], customer: CUSTOMER }]);
   assert.ok(!sent[0].includes("ACTION"));
 });
 
@@ -94,7 +96,8 @@ test("seats up to 999 are booked (parseBookings 1..999); 1000 or 0 are ignored",
     assert.ok(r.sent[0].includes("Masterclass persons: mc1 x " + n));
   }
   const x = await run(session({ item_ids: "mc1", bookings: "mc1:1000,mc3:0,mc3:020" }), { reply: ok([]) });
-  assert.equal(x.posts.length, 0, "nothing valid to book");
+  assert.equal(x.posts.length, 1, "the order is still logged");
+  assert.deepEqual(x.posts[0].body.bookings, [], "nothing valid to book");
 });
 
 test("unlimited masterclass: reply total null, overbooked false -> no OVERBOOKED line", async () => {
@@ -104,9 +107,12 @@ test("unlimited masterclass: reply total null, overbooked false -> no OVERBOOKED
   assert.equal(events(cap, "seats_overbooked").length, 0);
 });
 
-test("a vase-only order keeps the first-version payload {secret, ids}", async () => {
-  const { posts } = await run(session({ item_ids: "v3" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
-  assert.deepEqual(posts[0].body, { secret: SECRET, ids: ["v3"] });
+test("a vase-only order sends contract v4: no bookings, but order, extended customer and consent", async () => {
+  const { posts, res } = await run(session({ item_ids: "v3", privacy_accepted: "1", privacy_version: "2026-11", marketing_optout: "1", consent_at: "2026-11-04T10:00:00.000Z" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"], version: 9, orders: { status: "ok", rows: 1 } } });
+  assert.deepEqual(core(posts[0].body), { secret: SECRET, session_id: "cs_1", ids: ["v3"], bookings: [], customer: CUSTOMER });
+  assert.deepEqual(posts[0].body.consent, { privacy: true, privacy_version: "2026-11", marketing_optout: true, at: "2026-11-04T10:00:00.000Z" });
+  assert.equal(posts[0].body.order.lines.length, 1);
+  assert.equal(JSON.parse(res.body).orders, "ok");
 });
 
 test("script reply without version 2 while bookings were sent -> script_outdated, ACTION lines with the update hint", async () => {
@@ -208,14 +214,14 @@ test("buildOrderSummary shows the persons per masterclass, from metadata or expl
 
 test("the 200 answer to Stripe carries the sheet outcome (visible in Stripe's delivery log), never a secret", async () => {
   const good = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: ok([entry("mc1", 2)], ["v3"]) });
-  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok", calendar: "ok", script_version: 3 });
+  assert.deepEqual(JSON.parse(good.res.body), { received: true, sheet: "ok", calendar: "ok", orders: "ok", script_version: 3 });
   const old = await run(session({ item_ids: "v3,mc1", bookings: "mc1:2" }), { reply: { ok: true, sheet: "Vasi", marked: ["v3"] } });
   assert.equal(JSON.parse(old.res.body).sheet, "failed:script_outdated");
   const denied = await run(session({ item_ids: "v3" }), { reply: { ok: false, error: "forbidden" } });
   assert.match(JSON.parse(denied.res.body).sheet, /^failed:/);
   assert.ok(!denied.res.body.includes(SECRET) && !denied.res.body.includes("AKFY123"));
   const nothing = await run(session({ item_ids: "" }), { reply: ok([]) });
-  assert.deepEqual(JSON.parse(nothing.res.body), { received: true, sheet: "nothing_to_record", calendar: "none" });
+  assert.deepEqual(JSON.parse(nothing.res.body), { received: true, sheet: "nothing_to_record", calendar: "none", orders: "none" });
 });
 
 // ---- calendar (contract v3) ----
@@ -225,11 +231,11 @@ const bk = { item_ids: "mc1,mc3", bookings: "mc1:2,mc3:1" };
 test("customer {email, name, locale} rides in the same single POST; locale from the session, it by default; omitted without email and name", async () => {
   let x = await run(session(bk, { locale: "ru" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
   assert.equal(x.posts.length, 1);
-  assert.deepEqual(x.posts[0].body.customer, { email: "a@b.it", name: "Ann", locale: "ru" });
+  assert.deepEqual(x.posts[0].body.customer, { ...CUSTOMER, locale: "ru" });
   x = await run(session(bk, { locale: "de" }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
   assert.equal(x.posts[0].body.customer.locale, "it");
   x = await run(session(bk, { customer_details: { address: { country: "IT" } } }), { reply: ok([entry("mc1", 2), entry("mc3", 1)]) });
-  assert.ok(!("customer" in x.posts[0].body));
+  assert.ok(!("email" in x.posts[0].body.customer) && !("name" in x.posts[0].body.customer), "no email, no name");
   assert.equal(JSON.parse(x.res.body).calendar, "none", "no customer email: nothing to invite");
   assert.ok(!x.sent[0].includes("calendar event"));
 });
@@ -283,7 +289,7 @@ test("a booking without a calendar event is explained in the 200 answer (id:reas
   assert.ok(!a.res.body.includes("a@b.it") && !a.res.body.includes("Ann"));
   const created = { ...ok([{ ...entry("mc1", 2), calendar: { status: "created" } }]), version: 3 };
   const b = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: created });
-  assert.deepEqual(JSON.parse(b.res.body), { received: true, sheet: "ok", calendar: "ok", script_version: 3 });
+  assert.deepEqual(JSON.parse(b.res.body), { received: true, sheet: "ok", calendar: "ok", orders: "ok", script_version: 3 });
   const v2 = { ...ok([{ id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false }]), version: 2 }; // an older script: no calendar field
   const old = await run(session({ item_ids: "mc1", bookings: "mc1:2" }), { reply: v2 });
   assert.deepEqual(JSON.parse(old.res.body).calendar_issues, ["mc1:Apps Script needs updating"]);

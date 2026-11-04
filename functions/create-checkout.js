@@ -37,6 +37,15 @@ const ALLOWED_COUNTRIES = [
 ];
 
 const LOCALES = ["it", "en", "ru"];
+const DEFAULT_PRIVACY_VERSION = "2026-11";
+// Shown under the pay button of the Stripe page (custom_text.submit.message, <= 500 chars): plain URL, no markdown.
+const PRIVACY_TEXT = {
+  it: (url) => `Procedendo con il pagamento accetti il trattamento dei tuoi dati personali secondo l'informativa privacy: ${url}`,
+  en: (url) => `By proceeding with the payment you accept the processing of your personal data as described in the privacy notice: ${url}`,
+  ru: (url) => `Продолжая оплату, вы соглашаетесь на обработку ваших персональных данных в соответствии с политикой конфиденциальности: ${url}`,
+};
+// One privacy page per language at the site root (the default is Italian).
+const PRIVACY_PATH = { it: "/privacy-policy.html", en: "/privacy-policy.en.html", ru: "/privacy-policy.ru.html" };
 const NOTE_LABELS = {
   it: "Note per la consegna / regalo",
   en: "Delivery / gift note",
@@ -50,6 +59,22 @@ class ValidationError extends Error {
     this.code = code;
     if (itemId !== undefined) this.itemId = itemId; // catalogue id of the offending line
   }
+}
+
+// Consents sent by the site: {privacy: true (required), marketing_optout: boolean (optional, default false)}.
+// Returns {privacy: true, marketing_optout}. privacy_required when the notice was not accepted (or consents is missing),
+// invalid_consents when marketing_optout is present but not a boolean.
+function validateConsents(body) {
+  const c = body && body.consents;
+  if (!c || typeof c !== "object" || Array.isArray(c) || c.privacy !== true) throw new ValidationError("privacy_required");
+  if (c.marketing_optout !== undefined && typeof c.marketing_optout !== "boolean") throw new ValidationError("invalid_consents");
+  return { privacy: true, marketing_optout: c.marketing_optout === true };
+}
+
+// PRIVACY_POLICY_VERSION identifies the notice text the customer accepted; stored in the session metadata.
+function privacyVersion(env) {
+  const v = String((env && env.PRIVACY_POLICY_VERSION) || "").trim();
+  return /^[A-Za-z0-9._-]{1,40}$/.test(v) ? v : DEFAULT_PRIVACY_VERSION;
 }
 
 function normalizeOrigin(o) {
@@ -130,13 +155,14 @@ function validateGroup(it, catalogue, soldList, holds) {
   if (it.quantity > free) throw new ValidationError("not_enough_seats", it.id);
 }
 
-// Validates the (already JSON-parsed) body. Returns {items:[{id,quantity}], locale}
+// Validates the (already JSON-parsed) body. Returns {items:[{id,quantity}], locale, consents}
 // with duplicate ids merged (locale is null when missing/invalid: Stripe auto and
 // Italian copy are used; a masterclass id may appear only once: duplicate_item); throws
 // ValidationError on any client fault. Errors about a specific line carry itemId.
 // `holds`: {masterclassId: seats held by open Checkout Sessions}.
 function validateBody(body, catalogue = {}, soldList = [], holds = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("invalid_body");
+  const consents = validateConsents(body);
   const { items } = body;
   if (!Array.isArray(items) || items.length < 1 || items.length > MAX_ITEMS) throw new ValidationError("invalid_items");
   const merged = new Map();
@@ -162,7 +188,7 @@ function validateBody(body, catalogue = {}, soldList = [], holds = {}) {
     if (!groups.has(id) && quantity > max) throw new ValidationError("quantity_too_high", id);
     out.push({ id, quantity });
   }
-  return { items: out, locale: LOCALES.includes(body.locale) ? body.locale : null };
+  return { items: out, locale: LOCALES.includes(body.locale) ? body.locale : null, consents };
 }
 
 function productName(p, locale, suffix = "") {
@@ -227,7 +253,9 @@ function logLine(level, obj) {
 
 // Pure builder of the Stripe Checkout Session params. siteUrl must already be
 // validated (normalizeSiteUrl). Returns the params plus values used for logging.
-function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now }) {
+// `consents` ({privacy, marketing_optout}, from validateBody) adds the consent metadata (no personal data) and the
+// privacy line under the pay button; `privacyVersion` names the accepted notice.
+function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now, consents, privacyVersion: privacyVer = DEFAULT_PRIVACY_VERSION }) {
   const loc = LOCALES.includes(locale) ? locale : null;
   const line_items = buildLineItems(items, catalogue, siteUrl, loc || "it");
   const physicalCents = physicalSubtotal(items, catalogue);
@@ -278,6 +306,14 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now 
     metadata: { item_ids: kept.join(",") },
   };
   if (bookings.length) params.metadata.bookings = bookings.join(",");
+  if (consents) {
+    // Evidence kept by Stripe with the session and copied by the webhook into the private orders tabs.
+    params.metadata.privacy_accepted = "1";
+    params.metadata.privacy_version = String(privacyVer);
+    params.metadata.marketing_optout = consents.marketing_optout ? "1" : "0";
+    params.metadata.consent_at = new Date(now()).toISOString();
+    params.custom_text = { submit: { message: PRIVACY_TEXT[loc || "it"](`${siteUrl}${PRIVACY_PATH[loc || "it"]}`) } };
+  }
   if (loc) params.locale = loc;
   if (hasPhysical) {
     params.shipping_address_collection = { allowed_countries: ALLOWED_COUNTRIES };
@@ -372,7 +408,7 @@ function makeHandler({
       return json(500, { error: "server_error" }, cors, requestId);
     }
 
-    let items, locale, cat;
+    let items, locale, cat, consents;
     try {
       let body;
       try {
@@ -380,6 +416,7 @@ function makeHandler({
       } catch (_) {
         throw new ValidationError("invalid_json");
       }
+      if (body && typeof body === "object" && !Array.isArray(body)) validateConsents(body); // before any catalogue or Stripe call
       if (catalogue) {
         cat = catalogue;
       } else {
@@ -402,7 +439,7 @@ function makeHandler({
           logLine("warn", { event: "holds_unavailable", request_id: requestId, type: err && err.type, code: err && err.code, message: safeText(err && err.message, 200) });
         }
       }
-      ({ items, locale } = validateBody(body, cat, catalogue ? soldList || require("./sold.json") : [], holds));
+      ({ items, locale, consents } = validateBody(body, cat, catalogue ? soldList || require("./sold.json") : [], holds));
     } catch (err) {
       if (err instanceof ValidationError) {
         const log = { event: "validation_failed", request_id: requestId, code: err.code };
@@ -420,7 +457,7 @@ function makeHandler({
 
     try {
       const { params, itemIds, itemIdsTruncated, bookingsTruncated, subtotalCents, shippingCents } = buildSessionParams({
-        items, locale, catalogue: cat, siteUrl, now,
+        items, locale, catalogue: cat, siteUrl, now, consents, privacyVersion: privacyVersion(env),
       });
       if (itemIdsTruncated) {
         logLine("warn", { event: "metadata_item_ids_truncated", request_id: requestId, kept: params.metadata.item_ids });
@@ -469,6 +506,9 @@ exports.makeHandler = makeHandler;
 exports.isOriginAllowed = isOriginAllowed;
 exports.parseAllowedOrigins = parseAllowedOrigins;
 exports.validateBody = validateBody;
+exports.validateConsents = validateConsents;
+exports.privacyVersion = privacyVersion;
+exports.PRIVACY_PATH = PRIVACY_PATH;
 exports.personsSuffix = personsSuffix;
 exports.buildLineItems = buildLineItems;
 exports.buildSessionParams = buildSessionParams;

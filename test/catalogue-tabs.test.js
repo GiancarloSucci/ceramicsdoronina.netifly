@@ -425,7 +425,8 @@ test("webhook: script_outdated -> warn sold_mark_failed, ACTION line with '(Apps
     cap.restore();
   }
   assert.equal(r.statusCode, 200);
-  assert.ok(sent[0].endsWith("ACTION: mark v3 as sold in the sheet manually (Apps Script needs updating)"));
+  assert.ok(sent[0].includes("\nACTION: mark v3 as sold in the sheet manually (Apps Script needs updating)"));
+  assert.ok(sent[0].includes("\nACTION: record this order in the orders sheet manually (script_outdated)"));
   const [[lvl, o]] = events(cap, "sold_mark_failed");
   assert.deepEqual([lvl, o.reason], ["warn", "script_outdated"]);
   assert.ok(!cap.logs.some(([, l]) => l.includes("S3CRET") || l.includes("AKFY123")));
