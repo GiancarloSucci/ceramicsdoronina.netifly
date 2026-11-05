@@ -19,7 +19,7 @@ const ORIGIN = "https://ceramicsdoronina.it";
 
 function setup(over = {}) {
   // The fake enforces Stripe API rules (expires_at window, label/metadata limits, ...) on every call.
-  const { client: fake, calls } = makeStripeFake({ catalogue, now: () => 1_000_000_000_000, throwErr: over.throwErr });
+  const { client: fake, calls } = makeStripeFake({ catalogue, now: () => 1_000_000_000_000, throwErr: over.throwErr, trackOpen: over.trackOpen });
   const env = { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_SECRETVALUE", ...over.env };
   const handler = makeHandler({ stripeFactory: () => fake, env, catalogue, soldList: ["vm"], now: () => 1_000_000_000_000 });
   return { calls, handler };
@@ -144,10 +144,10 @@ test("base64 POST body and 30 distinct items accepted", async () => {
 });
 
 test("origin handling", async () => {
-  let r = await setup({ env: { ALLOWED_ORIGINS: "" } }).handler(post({ items: [{ id: "v1", quantity: 1 }] }));
+  let r = await setup({ env: { ALLOWED_ORIGINS: "" }, trackOpen: false }).handler(post({ items: [{ id: "v1", quantity: 1 }] }));
   assert.equal(r.statusCode, 500);
   assert.ok(!r.body.includes("ALLOWED"));
-  const { handler } = setup({ env: { ALLOWED_ORIGINS: "https://ceramicsdoronina.it/, https://www.ceramicsdoronina.it" } });
+  const { handler } = setup({ env: { ALLOWED_ORIGINS: "https://ceramicsdoronina.it/, https://www.ceramicsdoronina.it" }, trackOpen: false });
   const body = { items: [{ id: "v1", quantity: 1 }] };
   assert.equal((await handler(post(body, { headers: { origin: "https://evil.example" } }))).statusCode, 403);
   assert.equal((await handler(post(body, { headers: { origin: "https://CeramicsDoronina.it/" } }))).statusCode, 200);

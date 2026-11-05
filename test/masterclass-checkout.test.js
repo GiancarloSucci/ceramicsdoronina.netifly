@@ -28,7 +28,7 @@ function setup(over = {}) {
   const env = { ALLOWED_ORIGINS: ORIGIN, STRIPE_SECRET_KEY: "sk_test_SECRETVALUE", ...over.env };
   const getCatalogue = async () => {
     const r = await src.getCatalogue({ env: { CATALOGUE_MASTERCLASS_CSV_URL: MCURL }, fetchImpl: async () => new Response(csv, { status: 200 }), soldList: [], now: () => NOW });
-    return { items: { ...r.items, v1: VASE } };
+    return { items: { ...r.items, v1: VASE, ...over.items } };
   };
   const handler = makeHandler({ stripeFactory: () => fake.client, env, getCatalogue, now: () => NOW });
   return { ...fake, handler };
@@ -120,7 +120,7 @@ test("the same masterclass twice in one request is rejected (duplicate_item), al
   assert.equal(calls.length, 0);
 });
 
-test("holds: seats of OPEN sessions are subtracted (only for the requested ids), list is asked once with status open", async () => {
+test("holds: seats of OPEN sessions are subtracted (only for the requested ids), list is asked with status open (before create and once more after it)", async () => {
   const openSessions = [
     { id: "cs_x", metadata: { item_ids: "m2,m1", bookings: "m2:3,m1:2" } },
     { id: "cs_y", metadata: { item_ids: "v1" } },
@@ -132,7 +132,7 @@ test("holds: seats of OPEN sessions are subtracted (only for the requested ids),
   assert.deepEqual([r3.statusCode, body(r3).error, body(r3).item_id], [400, "not_enough_seats", "m2"]);
   assert.equal((await handler(post(mc("m2", 2)))).statusCode, 200);
   assert.deepEqual(listCalls[0], { status: "open", limit: 100 });
-  assert.equal(listCalls.length, 2);
+  assert.equal(listCalls.length, 3, "1 rejected request = 1 list; 1 created session = 2 lists (holds + race check)");
   // m1 holds are not mixed up with m2: 8 - 2 = 6 free, so 4 persons fit
   assert.equal((await handler(post(mc("m1", 4)))).statusCode, 200);
   assert.equal(calls.length, 2);
@@ -154,12 +154,15 @@ test("sequential checkouts hold seats: 4 persons then 3 persons on a workshop wi
   assert.equal((await f.handler(post(mc("m2", 2)))).statusCode, 200);
 });
 
-test("the open-session list is only called when the cart has a masterclass", async () => {
-  const f = setup();
+test("the open-session list is called only for a limited masterclass or a unique piece, never for unlimited masterclasses or multi-quantity items", async () => {
+  const DIGI = { type: "digital", name_it: "Carta", name_en: "Card", name_ru: "Карта", priceCents: 5000, sold: false, image: "", maxQty: 5 };
+  const f = setup({ items: { d1: DIGI }, fake: { trackOpen: false } });
+  assert.equal((await f.handler(post({ items: [{ id: "d1", quantity: 2 }], locale: "it" }))).statusCode, 200);
+  assert.equal(f.listCalls.length, 0, "maxQty 5: not a unique piece, no holds");
   assert.equal((await f.handler(post({ items: [{ id: "v1", quantity: 1 }], locale: "it" }))).statusCode, 200);
-  assert.equal(f.listCalls.length, 0);
-  assert.equal((await f.handler(post({ items: [{ id: "v1", quantity: 1 }, { id: "m1", quantity: 2 }], locale: "it" }))).statusCode, 200);
-  assert.equal(f.listCalls.length, 1);
+  assert.equal(f.listCalls.length, 2, "unique piece: holds before create + race check after");
+  assert.equal((await f.handler(post({ items: [{ id: "d1", quantity: 1 }, { id: "m1", quantity: 2 }], locale: "it" }))).statusCode, 200);
+  assert.equal(f.listCalls.length, 4, "limited masterclass: two more lists");
 });
 
 test("holds lookup failing -> fail open (checkout proceeds on seatsFree), warn event without secrets", async () => {
@@ -269,7 +272,7 @@ test("table mode stays capped at 20 and sizes without a price are not bookable, 
 test("limited masterclass with 30 seats: free seats and holds still decide, group cap is the seats (30)", async () => {
   const f = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "l1:10" } }] } });
   assert.equal((await f.handler(post(mc("l1", 15)))).statusCode, 200); // 30 - 5 booked - 10 held = 15 free
-  assert.equal(f.listCalls.length, 1);
+  assert.equal(f.listCalls.length, 2);
   const f2 = setup({ csv: CSV20, fake: { openSessions: [{ id: "cs_x", metadata: { bookings: "l1:10" } }] } });
   const [r] = await logsOf(() => f2.handler(post(mc("l1", 16))));
   assert.equal(body(r).error, "not_enough_seats");
@@ -318,4 +321,84 @@ test("no bookings metadata without a masterclass", async () => {
   const { handler, calls } = setup();
   await handler(post({ items: [{ id: "v1", quantity: 1 }], locale: "it" }));
   assert.equal("bookings" in calls[0].metadata, false);
+});
+
+// ── unique pieces: holds by open sessions and the post-create race check ──
+const OURS = { id: "cs_new", url: "https://checkout.stripe.com/c/new", created: 1000 };
+const vase = () => ({ items: [{ id: "v1", quantity: 1 }], locale: "it" });
+const events = (logs) => logs.map((l) => { try { return JSON.parse(l); } catch (_) { return {}; } });
+
+test("a unique piece held by another OPEN session is rejected with item_held (no session created)", async () => {
+  const f = setup({ fake: { openSessions: [{ id: "cs_x", created: 900, metadata: { item_ids: "m1,v1" } }] } });
+  const [r] = await logsOf(() => f.handler(post(vase())));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "item_held", "v1"]);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.expireCalls.length, 0);
+  // other pieces and prefix-like ids are not mixed up
+  const g = setup({ items: { v10: { ...VASE } }, fake: { openSessions: [{ id: "cs_x", created: 900, metadata: { item_ids: "v10" } }] } });
+  assert.equal((await g.handler(post(vase()))).statusCode, 200);
+});
+
+test("race: an EARLIER session appeared while ours was created -> ours is expired and the request fails with item_held", async () => {
+  const f = setup({ fake: { session: OURS, concurrent: [{ id: "cs_old", created: 900, metadata: { item_ids: "v1" } }] } });
+  const [r, logs] = await logsOf(() => f.handler(post(vase())));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "item_held", "v1"]);
+  assert.deepEqual(f.expireCalls, ["cs_new"]);
+  assert.ok(events(logs).some((o) => o.event === "race_lost" && o.code === "item_held" && o.session_id === "cs_new"));
+});
+
+test("race: our session is the EARLIER one -> it survives and nothing is expired (the later one will back off)", async () => {
+  const f = setup({ fake: { session: OURS, concurrent: [{ id: "cs_late", created: 1100, metadata: { item_ids: "v1" } }] } });
+  const r = await f.handler(post(vase()));
+  assert.equal(r.statusCode, 200);
+  assert.equal(body(r).session_id, "cs_new");
+  assert.equal(f.expireCalls.length, 0);
+});
+
+test("race: same second -> the lower session id wins", async () => {
+  const lose = setup({ fake: { session: OURS, concurrent: [{ id: "cs_aaa", created: 1000, metadata: { item_ids: "v1" } }] } });
+  const [r] = await logsOf(() => lose.handler(post(vase())));
+  assert.equal(body(r).error, "item_held");
+  assert.deepEqual(lose.expireCalls, ["cs_new"]);
+  const win = setup({ fake: { session: OURS, concurrent: [{ id: "cs_zzz", created: 1000, metadata: { item_ids: "v1" } }] } });
+  assert.equal((await win.handler(post(vase()))).statusCode, 200);
+  assert.equal(win.expireCalls.length, 0);
+});
+
+test("race: seats of EARLIER sessions plus ours over the free seats -> expired, not_enough_seats; within the seats -> fine", async () => {
+  // m2: 8 total - 2 booked = 6 free
+  const over = setup({ fake: { session: OURS, concurrent: [{ id: "cs_old", created: 900, metadata: { item_ids: "m2", bookings: "m2:4" } }] } });
+  const [r] = await logsOf(() => over.handler(post(mc("m2", 3))));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "not_enough_seats", "m2"]);
+  assert.deepEqual(over.expireCalls, ["cs_new"]);
+  const ok = setup({ fake: { session: OURS, concurrent: [{ id: "cs_old", created: 900, metadata: { item_ids: "m2", bookings: "m2:3" } }] } });
+  assert.equal((await ok.handler(post(mc("m2", 3)))).statusCode, 200);
+  assert.equal(ok.expireCalls.length, 0);
+  const later = setup({ fake: { session: OURS, concurrent: [{ id: "cs_late", created: 1100, metadata: { item_ids: "m2", bookings: "m2:6" } }] } });
+  assert.equal((await later.handler(post(mc("m2", 3)))).statusCode, 200, "a LATER session never costs us the seats");
+});
+
+test("race check: the second list failing fails open (session kept, warn without secrets); a failing expire is ignored", async () => {
+  const err = Object.assign(new Error("boom sk_test_LEAK"), { type: "StripeConnectionError", code: "x" });
+  const f = setup({ fake: { session: OURS, listErrOnCall: 2 } });
+  const [r, logs] = await logsOf(() => f.handler(post(vase())));
+  assert.equal(r.statusCode, 200);
+  assert.equal(f.expireCalls.length, 0);
+  assert.ok(events(logs).some((o) => o.event === "race_check_unavailable" && o.request_id));
+  const first = setup({ fake: { session: OURS, listErr: err } });
+  const [r1, l1] = await logsOf(() => first.handler(post(vase())));
+  assert.equal(r1.statusCode, 200, "both lists failing: fail open");
+  assert.ok(!l1.join("").includes("LEAK"));
+  const g = setup({ fake: { session: OURS, expireErr: err, concurrent: [{ id: "cs_old", created: 900, metadata: { item_ids: "v1" } }] } });
+  const [r2, l2] = await logsOf(() => g.handler(post(vase())));
+  assert.deepEqual([r2.statusCode, body(r2).error], [400, "item_held"]);
+  assert.ok(events(l2).some((o) => o.event === "race_expire_failed" && o.session_id === "cs_new"));
+  assert.ok(!l2.join("").includes("LEAK"));
+});
+
+test("a vase and a masterclass in one cart: the vase held by an earlier session beats the masterclass seats", async () => {
+  const f = setup({ fake: { session: OURS, concurrent: [{ id: "cs_old", created: 900, metadata: { item_ids: "v1" } }] } });
+  const [r] = await logsOf(() => f.handler(post({ items: [{ id: "m1", quantity: 2 }, { id: "v1", quantity: 1 }], locale: "it" })));
+  assert.deepEqual([r.statusCode, body(r).error, body(r).item_id], [400, "item_held", "v1"]);
+  assert.deepEqual(f.expireCalls, ["cs_new"]);
 });

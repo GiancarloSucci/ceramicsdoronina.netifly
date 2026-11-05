@@ -303,6 +303,7 @@ function makeHandler({
       let calendarOutcome = "none"; // ok | partial | none (nothing to book, or no customer email)
       let scriptVersion; // contract version the deployed Apps Script answered with (1 = no version field, an old script)
       let ordersOutcome = "none"; // ok | partial | none (nothing to log, or not configured) | failed:<code>
+      const oversold = []; // unique pieces someone else had already bought (ids only), shown in Stripe's delivery log
       const calendarIssues = []; // "<id>:<reason>" per booking without an event, shown in Stripe's delivery log (ids and fixed reasons only)
       const recordPaid = async (ids, sess, evt) => {
         let pieces = [];
@@ -365,6 +366,12 @@ function makeHandler({
             }
             if (hasCustomer && bookings.length) calendarOutcome = "ok"; // downgraded to partial below
             if (pieces.length) log("info", { event: "sold_marked", session_id: sess.id, event_id: evt.id, ids: pieces });
+            for (const id of Array.isArray(r.oversold) ? r.oversold : []) {
+              if (!pieces.includes(id) || oversold.includes(id)) continue;
+              oversold.push(id);
+              log("warn", { event: "piece_oversold", session_id: sess.id, event_id: evt.id, id });
+              lines.push(`OVERSOLD ${clean(id, 40)}: refund this order (already sold to someone else)`);
+            }
             if (bookings.length) {
               log("info", { event: "seats_booked", session_id: sess.id, event_id: evt.id, bookings: book });
               const reply = new Map((Array.isArray(r.booked) ? r.booked : []).map((b) => [b.id, b]));
@@ -441,7 +448,7 @@ function makeHandler({
       const delivered = await notify(summary, env, undefined, requestId);
       if (env.OWNER_NOTIFY_WEBHOOK_URL && delivered === false) logNotConfigured(); // invalid URL: nothing was sent
       log("info", { event: "order_completed", event_type: stripeEvent.type, kind, event_id: stripeEvent.id, session_id: session.id, item_ids: itemIds, amount_total: session.amount_total, payment_status: session.payment_status });
-      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome, orders: ordersOutcome, ...(scriptVersion ? { script_version: scriptVersion } : {}), ...(calendarIssues.length ? { calendar_issues: calendarIssues } : {}) } : { received: true });
+      return res(200, sheetOutcome ? { received: true, sheet: sheetOutcome, calendar: calendarOutcome, orders: ordersOutcome, ...(scriptVersion ? { script_version: scriptVersion } : {}), ...(calendarIssues.length ? { calendar_issues: calendarIssues } : {}), ...(oversold.length ? { oversold } : {}) } : { received: true });
     } catch (err) {
       const out = { event: "webhook_processing_failed", event_id: stripeEvent.id, session_id: session.id, name: err && err.name };
       if (err && err.name === "NotifyFetchError") out.code = err.code; // never the URL

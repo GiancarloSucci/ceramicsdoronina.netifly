@@ -1,19 +1,23 @@
 // Reference copy of the Google Apps Script bound to the catalogue Google Sheet (documentation:
 // the live copy is pasted in Extensions > Apps Script; keep both in sync).
 // Web app: Execute as Me, Who has access: Anyone. Script property SECRET must equal
-// CATALOGUE_WRITE_SECRET in Netlify. Contract v4:
+// CATALOGUE_WRITE_SECRET in Netlify. Contract v5 (v4 + oversold):
 //   POST {"secret": "...", "session_id": "cs_...", "ids": ["v3", ...], "bookings": [{"id": "mc1", "seats": 2}, ...],
 //         "customer": {"email", "name", "phone", "locale": "it|en|ru", "billing": {line1,line2,city,postal_code,state,country},
 //                      "shipping": {name,line1,line2,city,postal_code,state,country}},        (customer: optional, all fields optional)
 //         "order": {"total_cents", "currency", "created_iso", "lines": [{"id","kind":"vasi|masterclass|certificati","name","quantity","seats?","amount_cents"}]},
 //         "consent": {"privacy": true, "email_marketing": true, "other_channels": false, "third_party": false,
 //                     "privacy_version": "2026-11-04", "at": "ISO"}}   (order, consent: optional)
-//   -> {"ok":true,"version":10,"sheet":"Vasi","marked":[...],
+//   -> {"ok":true,"version":11,"sheet":"Vasi","marked":[...],"oversold":["v3"],
 //       "booked":[{"id":"mc1","seats":2,"booked_after":2,"total":8,"overbooked":false,"duplicate":false,
 //                  "calendar":{"status":"created|exists|skipped|failed","reason":"..."}}],
 //       "orders":{"status":"ok|skipped|failed","reason":"...","rows":3}}
 //    | {"ok":false,"error":"forbidden|bad_json|bad_ids|bad_sheet|bad_columns|bad_orders|bad_bookings"}
-// ids: unique pieces, marked venduto = 'si' in the tab Vasi. bookings: in the tab Masterclass the column
+// ids: unique pieces, marked venduto = 'si' in the tab Vasi. `oversold` lists the ids that were ALREADY 'si' before this session
+// marked them, i.e. someone else got the piece first (two customers paid for the same unique piece): the owner must refund this
+// order. A Stripe retry of the same session is not a second sale: the tab Ordini remembers (session_id, id) for pieces too (seats
+// cell 0, or the text 'oversold' when the session was flagged, so a retry repeats the warning if the first reply never arrived).
+// Without session_id the sale cannot be told from a retry, so nothing is flagged. bookings: in the tab Masterclass the column
 // seats_booked of the row with that id grows by `seats` (blank = 0), once per (session_id, id): the tab
 // Ordini (created if missing; session_id, item_id, seats, at, event_id) remembers what was applied, so a Stripe
 // retry reports duplicate:true and changes nothing. overbooked = booked_after > seats_total (a number; blank = unlimited): the booking
@@ -49,6 +53,7 @@ var SEATS_BOOKED_HEADER = 'seats_booked'; // column that receives the booked sea
 var SEATS_TOTAL_HEADER = 'seats_total';
 var ORDERS_SHEET_NAME = 'Ordini'; // idempotency log: one row per applied booking
 var ORDERS_HEADERS = ['session_id', 'item_id', 'seats', 'at', 'event_id'];
+var OVERSOLD_MARK = 'oversold'; // text in the seats cell of the Ordini row of a piece that was already sold
 var EVENT_ID_COL = 5; // 1-based column of event_id in Ordini
 var TIME_ZONE = 'Europe/Rome';
 var DEFAULT_DURATION_MS = 2 * 3600 * 1000; // a single time 'HH:MM' lasts 2 hours
@@ -76,7 +81,7 @@ var PHONE_COL = 6; // 1-based column of telefono: plain-text format so a leading
 var ID_RE = /^[a-z][a-z0-9-]{0,31}$/;
 var MAX_ITEMS = 30; // cap on ids and on bookings per call
 var MAX_SEATS = 999; // persons in ONE booking (1..999; linear pricing is not limited to 20)
-var VERSION = 10; // Version
+var VERSION = 11; // Version
 
 function doPost(e) {
   var body;
@@ -104,15 +109,29 @@ function doPost(e) {
     var sheet = ss.getSheetByName(SHEET_NAME);
     if (!sheet) return out_({ ok: false, error: 'bad_sheet' });
     var marked = [];
+    var oversold = [];
     if (ids.length) {
       var data = sheet.getDataRange().getValues();
       var idCol = data[0].indexOf(ID_HEADER);
       var soldCol = data[0].indexOf(SOLD_HEADER);
       if (idCol < 0 || soldCol < 0) return out_({ ok: false, error: 'bad_columns' });
+      // The idempotency log tells a retry of this session from a second sale; a log problem only disables the detection.
+      var log = typeof body.session_id === 'string' && body.session_id && body.session_id.length <= 200 ? openLog_(ss) : { error: 'no_session' };
       for (var i = 1; i < data.length; i++) {
-        if (ids.indexOf(String(data[i][idCol])) >= 0) {
-          sheet.getRange(i + 1, soldCol + 1).setValue(SOLD_VALUE);
-          marked.push(String(data[i][idCol]));
+        var pid = String(data[i][idCol]);
+        if (ids.indexOf(pid) < 0) continue;
+        var wasSold = String(data[i][soldCol]).trim().toLowerCase() === SOLD_VALUE;
+        sheet.getRange(i + 1, soldCol + 1).setValue(SOLD_VALUE);
+        marked.push(pid);
+        if (log.error) continue;
+        var key = body.session_id + '|' + pid;
+        var seen = log.done[key];
+        if (seen) {
+          if (seen.seats === OVERSOLD_MARK) oversold.push(pid);
+        } else {
+          log.sheet.appendRow([body.session_id, pid, wasSold ? OVERSOLD_MARK : 0, new Date().toISOString(), '']);
+          log.done[key] = { row: log.next++, event: '', seats: wasSold ? OVERSOLD_MARK : '0' };
+          if (wasSold) oversold.push(pid);
         }
       }
     }
@@ -125,7 +144,7 @@ function doPost(e) {
       events = res.events;
     }
     var orders = order === undefined ? { status: 'skipped', reason: 'no_order', rows: 0 } : logOrder_(body.session_id, order, customer, consent, events);
-    return out_({ ok: true, version: VERSION, sheet: SHEET_NAME, marked: marked, booked: booked, orders: orders });
+    return out_({ ok: true, version: VERSION, sheet: SHEET_NAME, marked: marked, oversold: oversold, booked: booked, orders: orders });
   } finally {
     lock.releaseLock();
   }
@@ -196,16 +215,9 @@ function validBooking_(b) {
   return b && typeof b === 'object' && validId_(b.id) && typeof b.seats === 'number' && b.seats % 1 === 0 && b.seats >= 1 && b.seats <= MAX_SEATS;
 }
 
-// Applies the bookings (call inside the script lock). Returns {booked: [...]} or {error}.
-// A booking whose id is not in the tab Masterclass is simply not reported: the function then tells the owner.
-function book_(ss, sessionId, bookings, customer) {
-  var mc = ss.getSheetByName(MC_SHEET_NAME);
-  if (!mc) return { error: 'bad_sheet' };
-  var data = mc.getDataRange().getValues();
-  var idCol = data[0].indexOf(ID_HEADER);
-  var bookedCol = data[0].indexOf(SEATS_BOOKED_HEADER);
-  var totalCol = data[0].indexOf(SEATS_TOTAL_HEADER);
-  if (idCol < 0 || bookedCol < 0) return { error: 'bad_columns' };
+// The idempotency tab Ordini (created if missing): {sheet, done, next} or {error:'bad_orders'}. done maps 'session|item' to
+// {row, event, seats} (seats as text); next is the first free row. Call inside the script lock.
+function openLog_(ss) {
   var orders = ss.getSheetByName(ORDERS_SHEET_NAME);
   if (!orders) {
     orders = ss.insertSheet(ORDERS_SHEET_NAME);
@@ -216,9 +228,26 @@ function book_(ss, sessionId, bookings, customer) {
   var legacy = ORDERS_HEADERS.slice(0, 4).join(',');
   if (head === legacy) orders.getRange(1, EVENT_ID_COL).setValue(ORDERS_HEADERS[4]); // migration: v2 tab had no event_id
   else if (head !== ORDERS_HEADERS.join(',')) return { error: 'bad_orders' };
-  var done = {}; // session|item -> {row: sheet row in Ordini, event: event_id or ''}
-  for (var j = 1; j < odata.length; j++) done[String(odata[j][0]) + '|' + String(odata[j][1])] = { row: j + 1, event: String(odata[j][4] || '') };
-  var nextRow = odata.length + 1;
+  var done = {};
+  for (var j = 1; j < odata.length; j++) done[String(odata[j][0]) + '|' + String(odata[j][1])] = { row: j + 1, event: String(odata[j][4] || ''), seats: String(odata[j][2]) };
+  return { sheet: orders, done: done, next: odata.length + 1 };
+}
+
+// Applies the bookings (call inside the script lock). Returns {booked: [...]} or {error}.
+// A booking whose id is not in the tab Masterclass is simply not reported: the function then tells the owner.
+function book_(ss, sessionId, bookings, customer) {
+  var mc = ss.getSheetByName(MC_SHEET_NAME);
+  if (!mc) return { error: 'bad_sheet' };
+  var data = mc.getDataRange().getValues();
+  var idCol = data[0].indexOf(ID_HEADER);
+  var bookedCol = data[0].indexOf(SEATS_BOOKED_HEADER);
+  var totalCol = data[0].indexOf(SEATS_TOTAL_HEADER);
+  if (idCol < 0 || bookedCol < 0) return { error: 'bad_columns' };
+  var lg = openLog_(ss);
+  if (lg.error) return { error: lg.error };
+  var orders = lg.sheet;
+  var done = lg.done; // session|item -> {row: sheet row in Ordini, event: event_id or '', seats}
+  var nextRow = lg.next;
   var disp = null; // display values of the tab Masterclass, read once and only when an event is needed
   var eventFor = function (rowIdx, b) {
     if (!disp) disp = mc.getDataRange().getDisplayValues();

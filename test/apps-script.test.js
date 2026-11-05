@@ -123,7 +123,7 @@ test("marks vases and books seats in one call (v2 reply)", () => {
   const s = fresh();
   const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v3"], bookings: [{ id: "mc1", seats: 2 }, { id: "mc2", seats: 2 }, { id: "nope", seats: 1 }] });
   assert.deepEqual(r, {
-    ok: true, version: 10, sheet: "Vasi", marked: ["v3"], orders: NO_ORDER,
+    ok: true, version: 11, sheet: "Vasi", marked: ["v3"], oversold: [], orders: NO_ORDER,
     booked: [
       { id: "mc1", seats: 2, booked_after: 2, total: 8, overbooked: false, duplicate: false, calendar: SKIP }, // blank seats_booked = 0
       { id: "mc2", seats: 2, booked_after: 5, total: 4, overbooked: true, duplicate: false, calendar: SKIP }, // recorded anyway
@@ -131,9 +131,9 @@ test("marks vases and books seats in one call (v2 reply)", () => {
   });
   assert.equal(s.Vasi[2][1], "si");
   assert.deepEqual([s.Masterclass[1][2], s.Masterclass[2][2]], [2, 5]);
-  assert.deepEqual(s.Ordini.slice(0, 2).map((x) => x.slice(0, 3)), [["session_id", "item_id", "seats"], ["cs_1", "mc1", 2]]);
-  assert.match(s.Ordini[1][3], /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(s.Ordini.length, 3, "unknown id is not recorded");
+  assert.deepEqual(s.Ordini.slice(0, 3).map((x) => x.slice(0, 3)), [["session_id", "item_id", "seats"], ["cs_1", "v3", 0], ["cs_1", "mc1", 2]]); // the piece is logged first
+  assert.match(s.Ordini[2][3], /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(s.Ordini.length, 4, "header + the piece + 2 known bookings; the unknown booking id is not recorded");
 });
 
 test("idempotent per session and item: a retry reports duplicate and changes nothing; another session adds up", () => {
@@ -161,7 +161,7 @@ test("blank seats_total (or no column) means unlimited: total null, never overbo
   const text = { ...fresh(), Masterclass: [["id", "seats_total", "seats_booked"], ["mc1", "many", 5]] };
   assert.deepEqual([script(text)({ secret: "S", session_id: "cs_3", ids: [], bookings: [{ id: "mc1", seats: 1 }] }).booked[0].total], [null], "non-numeric cell: unknown");
   const v = script(fresh())({ secret: "S", ids: ["v1"] });
-  assert.deepEqual(v, { ok: true, version: 10, sheet: "Vasi", marked: ["v1"], booked: [], orders: NO_ORDER });
+  assert.deepEqual(v, { ok: true, version: 11, sheet: "Vasi", marked: ["v1"], oversold: [], booked: [], orders: NO_ORDER });
 });
 
 test("limited seats_total above 8 and seats 20 work; seats up to 999 are valid, 1000 is rejected", () => {
@@ -396,7 +396,7 @@ test("calendar: no customer data in Ordini or in the reply", () => {
 
 test("doGet names the deployed contract version and nothing else (no secret, no sheet data)", () => {
   const r = script(fresh(), "TOPSECRET").get();
-  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 10 });
+  assert.deepEqual(r, { ok: true, script: "ceramicsdoronina-catalogue", version: 11 });
 });
 
 // ---- order log (contract v4): private tabs per kind in a SEPARATE spreadsheet, full customer record, four consents ----
@@ -635,4 +635,50 @@ test("order log: no customer data in the catalogue tabs or in the reply", () => 
   const reply = JSON.stringify(r);
   for (const pii of ["ann@example.com", "Ann Rossi", "Via Roma", "380"]) assert.ok(!reply.includes(pii), pii);
   assert.ok(!JSON.stringify(s.Vasi).includes("Ann") && !JSON.stringify(s.Masterclass).includes("Ann"));
+});
+
+// ── oversold: a unique piece that was already sold when this session marked it ──
+test("oversold: the piece was already 'si' before another session marked it -> listed; first sale and retries are not", () => {
+  const s = fresh();
+  const call = script(s);
+  const first = call({ secret: "S", session_id: "cs_a", ids: ["v1"] });
+  assert.deepEqual([first.marked, first.oversold], [["v1"], []]);
+  const second = call({ secret: "S", session_id: "cs_b", ids: ["v1", "v3"] });
+  assert.deepEqual([second.marked, second.oversold], [["v1", "v3"], ["v1"]], "v1 was already sold by cs_a; v3 is a first sale");
+  assert.equal(s.Vasi[1][1], "si");
+  // retries of the same sessions: the first sale stays clean, the oversold session repeats its warning (the first reply may have been lost)
+  assert.deepEqual(call({ secret: "S", session_id: "cs_a", ids: ["v1"] }).oversold, []);
+  assert.deepEqual(call({ secret: "S", session_id: "cs_b", ids: ["v1", "v3"] }).oversold, ["v1"]);
+  assert.deepEqual(s.Ordini.slice(1).map((x) => x.slice(0, 3)), [["cs_a", "v1", 0], ["cs_b", "v1", "oversold"], ["cs_b", "v3", 0]], "one log row per (session, piece), no duplicates on retry");
+});
+
+test("oversold: venduto written as ' SI ' counts as sold; a piece sold by hand before the first payment is reported", () => {
+  const s = fresh();
+  s.Vasi[1][1] = " SI ";
+  assert.deepEqual(script(s)({ secret: "S", session_id: "cs_1", ids: ["v1"] }).oversold, ["v1"]);
+});
+
+test("oversold: without a session_id a retry cannot be told from a second sale, so nothing is flagged and nothing is logged", () => {
+  const s = fresh();
+  const call = script(s);
+  call({ secret: "S", ids: ["v1"] });
+  const r = call({ secret: "S", ids: ["v1"] });
+  assert.deepEqual([r.ok, r.marked, r.oversold], [true, ["v1"], []]);
+  assert.equal(s.Ordini, undefined);
+});
+
+test("oversold: a damaged Ordini header never blocks marking, it only disables the detection", () => {
+  const s = fresh();
+  s.Ordini = [["x", "y"]];
+  const r = script(s)({ secret: "S", session_id: "cs_1", ids: ["v1"] });
+  assert.deepEqual([r.ok, r.marked, r.oversold], [true, ["v1"], []]);
+  assert.equal(s.Vasi[1][1], "si");
+});
+
+test("oversold: a booking in the same session as a piece keeps working (the log rows do not collide)", () => {
+  const s = fresh();
+  const call = script(s);
+  call({ secret: "S", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc1", seats: 2 }] });
+  const again = call({ secret: "S", session_id: "cs_1", ids: ["v1"], bookings: [{ id: "mc1", seats: 2 }] });
+  assert.deepEqual([again.oversold, again.booked[0].duplicate, s.Masterclass[1][2]], [[], true, 2]);
 });

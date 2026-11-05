@@ -680,7 +680,7 @@ async function postOnce(url, payload, fetchImpl, timeoutMs, v2) {
       // An ok reply that does not name the Vasi tab (or, with bookings, is not version 2) comes from an old, not yet redeployed script.
       if (body && body.ok === true) {
         if (body.sheet !== SHEET_NAME || (v2 && !(typeof body.version === "number" && body.version >= 2))) return { ok: false, reason: "script_outdated", retry: false };
-        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], booked: cleanBooked(body.booked), version: typeof body.version === "number" ? body.version : 1, orders: cleanOrders(body.orders) };
+        return { ok: true, marked: Array.isArray(body.marked) ? body.marked : [], oversold: Array.isArray(body.oversold) ? body.oversold.filter((x) => typeof x === "string" && ID_RE.test(x)) : [], booked: cleanBooked(body.booked), version: typeof body.version === "number" ? body.version : 1, orders: cleanOrders(body.orders) };
       }
       if (body && typeof body.error === "string" && /^[a-z_]{1,30}$/.test(body.error)) return { ok: false, reason: body.error, retry: false };
       return { ok: false, reason: res.ok ? "rejected" : "http_" + res.status, retry: !res.ok && res.status >= 500 };
@@ -823,6 +823,7 @@ async function markSold(ids, { fetchImpl = globalThis.fetch, env = process.env, 
   }
   if (!last.ok) return { ok: false, reason: last.reason };
   const res = book.length ? { ok: true, marked: last.marked, booked: last.booked, version: last.version } : { ok: true, marked: last.marked, version: last.version };
+  if (last.oversold && last.oversold.length) res.oversold = last.oversold; // ids that were already sold when this session marked them (script v11)
   if (cleanedOrder) res.orders = last.orders; // null = the script did not answer `orders` (older than version 9)
   return res;
 }

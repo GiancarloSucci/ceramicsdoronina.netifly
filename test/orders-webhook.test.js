@@ -191,3 +191,28 @@ test("buildCustomer / buildConsent / buildOrder: shapes, caps and omissions", ()
   assert.equal(many.order.lines.length, 50);
   assert.equal(buildOrder(session({}), [], "", [], CAT).order.lines.length, 0);
 });
+
+// ── script v11: unique piece already sold by someone else ──
+test("oversold piece: owner message gets an OVERSOLD line, the 200 body lists the ids only, the log has ids and no PII", async () => {
+  const x = await run(session({ item_ids: "v3", ...CONSENT_MD }), { lines: [LI("v3", "Vaso tre", 28000)], reply: v9({ status: "ok", rows: 1 }, { version: 11, marked: ["v3"], oversold: ["v3"] }) });
+  assert.deepEqual(x.body, { received: true, sheet: "ok", calendar: "none", orders: "ok", script_version: 11, oversold: ["v3"] });
+  assert.equal(x.sent.length, 1);
+  assert.match(x.sent[0], /OVERSOLD v3: refund this order \(already sold to someone else\)/);
+  const log = x.cap.logs.map((l) => { try { return JSON.parse(l); } catch (_) { return {}; } }).find((o) => o.event === "piece_oversold");
+  assert.ok(log && log.id === "v3" && log.session_id === "cs_ord");
+  const all = x.cap.logs.join("\n") + x.res.body;
+  for (const p of PII) assert.ok(!all.includes(p), `PII leaked: ${p}`);
+});
+
+test("oversold: only ids of the pieces of this order are believed (a foreign id in the reply is ignored); none -> no field, no line", async () => {
+  const x = await run(session({ item_ids: "v3", ...CONSENT_MD }), { lines: [LI("v3", "Vaso tre", 28000)], reply: v9({ status: "ok", rows: 1 }, { marked: ["v3"], oversold: ["v99", "../x"] }) });
+  assert.equal(x.body.oversold, undefined);
+  assert.ok(!/OVERSOLD/.test(x.sent[0] || ""));
+  const y = await run(session({ item_ids: "v3", ...CONSENT_MD }), { lines: [LI("v3", "Vaso tre", 28000)], reply: v9({ status: "ok", rows: 1 }, { marked: ["v3"] }) });
+  assert.equal(y.body.oversold, undefined);
+});
+
+test("oversold in a mixed cart: the masterclass and certificate lines are not affected", async () => {
+  const x = await run(MIXED, { reply: v9({ status: "ok", rows: 3 }, { version: 11, marked: ["v3"], oversold: ["v3"], booked: [bookedOf("mc1", 2)] }) });
+  assert.deepEqual([x.body.sheet, x.body.calendar, x.body.orders, x.body.oversold], ["ok", "ok", "ok", ["v3"]]);
+});

@@ -68,11 +68,13 @@ function assertStripeRules(params, { now = Date.now(), catalogue } = {}) {
 
 // Fake Stripe client. Records every create() call after validating it; a created session becomes an
 // OPEN session (visible to list(), like on Stripe until it is paid or expires) unless opts.trackOpen is false.
-// opts.openSessions: sessions already open, [{id, metadata}]; opts.listErr: list() rejects with it;
+// opts.concurrent: [{id, metadata, created}] added to the open sessions inside create(); opts.listErrOnCall: n makes the n-th list() call (1-based) reject
+// opts.openSessions: sessions already open, [{id, metadata, created}]; opts.expireErr: expire() rejects with it; opts.listErr: list() rejects with it;
 // opts.hasMore: list() reports has_more. list() validates its params like the API (status, limit 1..100).
-function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url: "https://checkout.stripe.com/c/1" }, openSessions = [], listErr, hasMore = false, trackOpen = true } = {}) {
+function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url: "https://checkout.stripe.com/c/1" }, openSessions = [], listErr, hasMore = false, trackOpen = true, sessions = {}, retrieveErr, expireErr, concurrent = [], listErrOnCall } = {}) {
   const calls = [];
   const listCalls = [];
+  const expireCalls = [];
   const open = openSessions.map((s) => ({ status: "open", ...s }));
   const client = {
     checkout: {
@@ -81,20 +83,44 @@ function makeStripeFake({ catalogue, now, throwErr, session = { id: "cs_1", url:
           assertStripeRules(p, { now: typeof now === "function" ? now() : now, catalogue });
           calls.push(p);
           if (throwErr) throw throwErr;
-          if (trackOpen) open.push({ id: session.id, status: "open", metadata: p.metadata });
+          // `concurrent`: sessions that appear while this create() is in flight (they were not visible to the earlier list)
+          for (const c of concurrent) open.push({ status: "open", ...c });
+          if (trackOpen) open.push({ id: session.id, status: "open", metadata: p.metadata, ...(session.created !== undefined ? { created: session.created } : {}) });
           return session;
+        },
+        // retrieve(id): sessions given in opts.sessions ({id: {status, payment_status}}) or created through create(); else resource_missing like the API.
+        retrieve: async (id) => {
+          assert.ok(typeof id === "string" && id.startsWith("cs_"), "retrieve needs a session id");
+          if (retrieveErr) throw retrieveErr;
+          if (sessions[id]) return { id, object: "checkout.session", ...sessions[id] };
+          const o = open.find((x) => x.id === id);
+          if (o) return { id, object: "checkout.session", status: o.status, payment_status: "unpaid" };
+          const err = new Error(`No such checkout.session: '${id}'`);
+          err.type = "StripeInvalidRequestError";
+          err.code = "resource_missing";
+          err.statusCode = 404;
+          throw err;
+        },
+        // expire(id): an open session becomes expired (like the API); opts.expireErr makes it reject.
+        expire: async (id) => {
+          assert.ok(typeof id === "string" && id.startsWith("cs_"), "expire needs a session id");
+          expireCalls.push(id);
+          if (expireErr) throw expireErr;
+          const o = open.find((x) => x.id === id);
+          if (o) o.status = "expired";
+          return { id, object: "checkout.session", status: "expired" };
         },
         list: async (p) => {
           listCalls.push(p);
           assert.ok(p && p.limit >= 1 && p.limit <= 100, "list limit 1..100");
           assert.ok(!p.status || ["open", "complete", "expired"].includes(p.status), "list status");
-          if (listErr) throw listErr;
+          if (listErr || listCalls.length === listErrOnCall) throw listErr || new Error("list failed on call " + listCalls.length);
           return { object: "list", data: open.filter((s) => !p.status || s.status === p.status), has_more: hasMore };
         },
       },
     },
   };
-  return { client, calls, listCalls, open };
+  return { client, calls, listCalls, expireCalls, open };
 }
 
 module.exports = { assertStripeRules, makeStripeFake };

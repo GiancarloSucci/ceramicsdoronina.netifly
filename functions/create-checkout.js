@@ -8,6 +8,11 @@
 // within Stripe's maximum amount), charged as ONE Stripe line (quantity 1). Seats still free = seatsFree minus the
 // seats held by other OPEN Checkout Sessions (metadata.bookings), so two customers cannot both take the last seats.
 // Unlimited masterclasses (seatsFree null) skip the seat and holds checks.
+// UNIQUE pieces (non-masterclass, maxQty 1) are held the same way: while another OPEN Checkout Session lists the piece in
+// metadata.item_ids the answer is 400 item_held. Because check-then-create is not atomic, after create() the open sessions
+// are listed again: if an EARLIER session (lower `created`, tie: lower id) holds the same piece, or the seats of earlier
+// sessions plus ours exceed the free seats, our own session is expired at once and the request fails (item_held /
+// not_enough_seats). Both Stripe lookups fail open (warn log); the webhook still reports OVERSOLD / OVERBOOKED.
 const crypto = require("crypto");
 const { STRIPE_API_VERSION, defaultStripeFactory, decodeBody, safeText, parseBookings, MAX_GROUP, STRIPE_MAX_CENTS, maxLinearPersons } = require("./_shared.js");
 const { getCatalogue: defaultGetCatalogue } = require("./_catalogue-source.js");
@@ -155,6 +160,11 @@ function isMasterclass(p) {
   return !!p && Array.isArray(p.tiersCents);
 }
 
+// A UNIQUE piece: not a masterclass and at most one can be bought (maxQty 1, the default).
+function isUnique(p) {
+  return !!p && !isMasterclass(p) && (Number.isInteger(p.maxQty) ? p.maxQty : 1) === 1;
+}
+
 // Total cents of a masterclass booking of `persons`: N x linearCents (linear) or the table tier (null = not bookable).
 function groupCents(p, persons) {
   if (p.pricing === "linear") return persons <= maxLinearPersons(p.linearCents) ? p.linearCents * persons : null;
@@ -185,7 +195,7 @@ function validateGroup(it, catalogue, soldList, holds) {
 // with duplicate ids merged (locale is null when missing/invalid: Stripe auto and
 // Italian copy are used; a masterclass id may appear only once: duplicate_item); throws
 // ValidationError on any client fault. Errors about a specific line carry itemId.
-// `holds`: {masterclassId: seats held by open Checkout Sessions}.
+// `holds`: {masterclassId: seats held by open Checkout Sessions, uniquePieceId: number of other open sessions holding it}.
 function validateBody(body, catalogue = {}, soldList = [], holds = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new ValidationError("invalid_body");
   const consents = validateConsents(body);
@@ -205,6 +215,7 @@ function validateBody(body, catalogue = {}, soldList = [], holds = {}) {
       continue;
     }
     if (isSold(it.id, catalogue, soldList)) throw new ValidationError("item_sold", it.id);
+    if (isUnique(catalogue[it.id]) && (holds[it.id] || 0) > 0) throw new ValidationError("item_held", it.id);
     if (!Number.isInteger(it.quantity) || it.quantity < 1) throw new ValidationError("invalid_quantity", it.id);
     merged.set(it.id, (merged.get(it.id) || 0) + it.quantity);
   }
@@ -368,15 +379,62 @@ function buildSessionParams({ items, locale, catalogue, siteUrl, now = Date.now,
   };
 }
 
-// Seats held by OPEN Checkout Sessions (not yet paid, not expired: at most 30 minutes) for the given
-// masterclass ids. Returns {holds: {id: seats}, hasMore}. Throws when Stripe cannot be asked.
-async function fetchHolds(stripe, ids) {
+// The OPEN Checkout Sessions (not yet paid, not expired: at most 30 minutes). Throws when Stripe cannot be asked.
+async function listOpenSessions(stripe) {
   const list = await stripe.checkout.sessions.list({ status: "open", limit: HOLDS_LIST_LIMIT });
+  return { sessions: (list && list.data) || [], hasMore: !!(list && list.has_more) };
+}
+
+function sessionItemIds(sess) {
+  return String((sess && sess.metadata && sess.metadata.item_ids) || "").split(",").filter(Boolean);
+}
+
+// Holds of the given open sessions: {id: seats} for masterclass ids (metadata.bookings) and {id: number of sessions}
+// for unique piece ids (metadata.item_ids).
+function computeHolds(sessions, massIds, uniqueIds) {
   const holds = {};
-  for (const s of (list && list.data) || []) {
-    for (const b of parseBookings(s && s.metadata && s.metadata.bookings)) if (ids.has(b.id)) holds[b.id] = (holds[b.id] || 0) + b.seats;
+  for (const sess of sessions) {
+    for (const b of parseBookings(sess && sess.metadata && sess.metadata.bookings)) if (massIds.has(b.id)) holds[b.id] = (holds[b.id] || 0) + b.seats;
+    if (uniqueIds.size) for (const id of new Set(sessionItemIds(sess))) if (uniqueIds.has(id)) holds[id] = (holds[id] || 0) + 1;
   }
-  return { holds, hasMore: !!(list && list.has_more) };
+  return holds;
+}
+
+// Which ids of a validated cart need a holds lookup: limited masterclasses and unique pieces.
+function holdIdSets(items, cat) {
+  const massIds = new Set();
+  const uniqueIds = new Set();
+  for (const it of Array.isArray(items) ? items : []) {
+    const id = it && it.id;
+    if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(cat, id)) continue;
+    if (isMasterclass(cat[id])) {
+      if (cat[id].seatsFree !== null) massIds.add(id); // unlimited: no holds lookup
+    } else if (isUnique(cat[id])) {
+      uniqueIds.add(id);
+    }
+  }
+  return { massIds, uniqueIds };
+}
+
+// True when `other` was created before `ours` (seconds; tie broken by session id), so it wins a race.
+function isEarlier(other, ours) {
+  const a = Number.isInteger(other.created) ? other.created : 0;
+  const b = Number.isInteger(ours.created) ? ours.created : 0;
+  return a < b || (a === b && String(other.id) < String(ours.id));
+}
+
+// After create(): does an EARLIER open session already hold what we just took? Returns {code, itemId} or null.
+function raceConflict(sessions, ours, items, cat) {
+  const earlier = sessions.filter((sess) => sess && sess.id !== ours.id && isEarlier(sess, ours));
+  const { massIds, uniqueIds } = holdIdSets(items, cat);
+  const heldEarlier = computeHolds(earlier, massIds, uniqueIds);
+  for (const id of uniqueIds) if ((heldEarlier[id] || 0) > 0) return { code: "item_held", itemId: id };
+  for (const it of items) {
+    if (!massIds.has(it.id)) continue;
+    const free = Number.isInteger(cat[it.id].seatsFree) ? cat[it.id].seatsFree : 0;
+    if ((heldEarlier[it.id] || 0) + it.quantity > free) return { code: "not_enough_seats", itemId: it.id };
+  }
+  return null;
 }
 
 function logUnexpected(requestId, err) {
@@ -453,18 +511,14 @@ function makeHandler({
       } else {
         ({ items: cat } = await getCatalogue({ fetchImpl, now, env, soldList }));
       }
-      // Seat holds are looked up only when the cart has a masterclass. Fail open: if Stripe cannot be
-      // asked, the sheet's seatsFree alone decides (a double booking is then caught by the webhook as OVERBOOKED).
+      // Holds are looked up only when the cart has a limited masterclass or a unique piece. Fail open: if Stripe cannot be
+      // asked, the sheet alone decides (the post-create check and the webhook catch a double booking / double sale).
       let holds = {};
-      const groupIds = new Set(
-        (Array.isArray(body && body.items) ? body.items : [])
-          .map((it) => it && it.id)
-          .filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(cat, id) && isMasterclass(cat[id]) && cat[id].seatsFree !== null) // unlimited: no holds lookup
-      );
-      if (groupIds.size) {
+      const { massIds, uniqueIds } = holdIdSets(body && body.items, cat);
+      if (massIds.size || uniqueIds.size) {
         try {
-          const r = await fetchHolds(stripeFactory(secretKey), groupIds);
-          holds = r.holds;
+          const r = await listOpenSessions(stripeFactory(secretKey));
+          holds = computeHolds(r.sessions, massIds, uniqueIds);
           if (r.hasMore) logLine("warn", { event: "holds_list_truncated", request_id: requestId, limit: HOLDS_LIST_LIMIT });
         } catch (err) {
           logLine("warn", { event: "holds_unavailable", request_id: requestId, type: err && err.type, code: err && err.code, message: safeText(err && err.message, 200) });
@@ -514,6 +568,28 @@ function makeHandler({
           message: safeText(err && err.message, 200),
         });
         return json(502, { error: "payment_provider_error" }, cors, requestId);
+      }
+
+      // Race check (see the header): an earlier open session wins; ours is expired and the request fails.
+      const { massIds: raceMass, uniqueIds: raceUnique } = holdIdSets(items, cat);
+      if (raceMass.size || raceUnique.size) {
+        let conflict = null;
+        try {
+          const r = await listOpenSessions(stripeFactory(secretKey));
+          const ours = { id: session.id, created: Number.isInteger(session.created) ? session.created : Math.floor(now() / 1000) };
+          conflict = raceConflict(r.sessions, ours, items, cat);
+        } catch (err) {
+          logLine("warn", { event: "race_check_unavailable", request_id: requestId, type: err && err.type, code: err && err.code, message: safeText(err && err.message, 200) });
+        }
+        if (conflict) {
+          try {
+            await stripeFactory(secretKey).checkout.sessions.expire(session.id);
+          } catch (err) {
+            logLine("warn", { event: "race_expire_failed", request_id: requestId, session_id: session.id, type: err && err.type, code: err && err.code, message: safeText(err && err.message, 200) });
+          }
+          logLine("warn", { event: "race_lost", request_id: requestId, session_id: session.id, code: conflict.code, item_id: conflict.itemId });
+          return json(400, { error: conflict.code, item_id: conflict.itemId }, cors, requestId);
+        }
       }
 
       logLine("info", {
